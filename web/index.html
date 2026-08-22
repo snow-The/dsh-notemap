@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-notemap · infinite canvas</title>
+<link rel="stylesheet" href="/notemap/styles.css">
+</head>
+<body>
+<div id="nm-toolbar">
+<input id="nm-search" type="text" placeholder="search notes…" autocomplete="off">
+<button id="nm-add" title="New note">＋ note</button>
+<button id="nm-layout" title="Re-layout (force) ">⟳ layout</button>
+<button id="nm-fit" title="Fit graph">⛶ fit</button>
+<span id="nm-count"></span>
+</div>
+<div id="nm-stage"><canvas id="nm-canvas"></canvas></div>
+<div id="nm-inspector" hidden><button id="nm-inspector-close" title="Close">×</button><h3 id="nm-inspector-title"></h3><div id="nm-inspector-body"></div><div id="nm-inspector-related"></div></div>
+<script src="/notemap/app.js"></script>
+</body>
+</html>

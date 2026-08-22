@@ -1,6 +1,9 @@
 // src/index.ts
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
+// src/ui.ts
+import { readFile } from "node:fs/promises";
+
 // src/graph.ts
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
@@ -423,11 +426,116 @@ function commonNeighbors(args) {
   return getStore().commonNeighbors(args.a, args.b);
 }
 
+// src/ui.ts
+var sendFile = (res, type, body) => {
+  res.writeHead(200, { "content-type": type });
+  res.end(body);
+};
+var sendJson = (res, obj, code = 200) => {
+  res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(obj));
+};
+var readBody = (req) => new Promise((resolve, reject) => {
+  let data = "";
+  req.on("data", (chunk) => {
+    data += chunk.toString("utf8");
+  });
+  req.on("end", () => resolve(data));
+  req.on("error", reject);
+});
+async function apiHandler(req, res) {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const route = url.pathname.replace(/^\/notemap\/api/, "") || "/";
+  const method = req.method ?? "GET";
+  try {
+    if (route === "/graph" && method === "GET") {
+      sendJson(res, exportGraph());
+      return;
+    }
+    if (route === "/stats" && method === "GET") {
+      sendJson(res, graphStats());
+      return;
+    }
+    if (route === "/related" && method === "GET") {
+      const id = url.searchParams.get("id") ?? "";
+      const limit = Number(url.searchParams.get("limit") ?? 10);
+      sendJson(res, findRelated({ id, limit }));
+      return;
+    }
+    if (route === "/add" && method === "POST") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      sendJson(res, addNote({ title: String(body.title ?? "untitled"), content: body.content, type: body.type }));
+      return;
+    }
+    if (route === "/link" && method === "POST") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      sendJson(res, linkNotes({ source: String(body.source), target: String(body.target), type: body.type, weight: body.weight, confidence: body.confidence }));
+      return;
+    }
+    if (route === "/project" && method === "POST") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const events = Array.isArray(body.events) ? body.events : [];
+      const created = [];
+      for (const ev of events) {
+        if (!ev || typeof ev.id !== "string") continue;
+        const title = String(ev.title ?? "event");
+        const content = typeof ev.content === "string" ? ev.content : "";
+        const type = typeof ev.type === "string" ? ev.type : "session-event";
+        try {
+          const node = addNote({ id: ev.id, title, content, type });
+          created.push(node.id);
+          if (typeof ev.parentId === "string" && ev.parentId && ev.parentId !== ev.id) {
+            linkNotes({ source: ev.parentId, target: ev.id, type: ev.edgeType ?? "follows", weight: ev.weight ?? 0.8, confidence: 1 });
+          }
+        } catch {
+        }
+      }
+      sendJson(res, { ok: true, created: created.length });
+      return;
+    }
+    if (route === "/search" && method === "GET") {
+      const q = url.searchParams.get("q") ?? "";
+      sendJson(res, searchNotes({ q, limit: 20 }));
+      return;
+    }
+    sendJson(res, { error: "not found" }, 404);
+  } catch (err) {
+    sendJson(res, { error: err?.message ?? String(err) }, 500);
+  }
+}
+async function registerUi(ctx) {
+  const ws = ctx.webServer;
+  if (!ws) return;
+  const base = new URL("../web/", import.meta.url);
+  const read = (p) => readFile(new URL(p, base), "utf8");
+  ws.register({ kind: "exact", path: "/notemap", handler: (_req, res) => {
+    res.writeHead(302, { location: "/notemap/" });
+    res.end();
+  } });
+  ws.register({ kind: "exact", path: "/notemap/", handler: async (_req, res) => {
+    sendFile(res, "text/html; charset=utf-8", await read("index.html"));
+  } });
+  ws.register({ kind: "exact", path: "/notemap/app.js", handler: async (_req, res) => {
+    sendFile(res, "text/javascript; charset=utf-8", await read("app.js"));
+  } });
+  ws.register({ kind: "exact", path: "/notemap/styles.css", handler: async (_req, res) => {
+    sendFile(res, "text/css; charset=utf-8", await read("styles.css"));
+  } });
+  ws.register({ kind: "prefix", path: "/notemap/api", handler: apiHandler });
+}
+function disposeUi() {
+  try {
+    closeStore();
+  } catch {
+  }
+}
+
 // src/index.ts
 var name = "dsh-notemap";
 function apply(ctx) {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
+  void registerUi(ctx);
   reg(defineTool({
     name: "notemap_add",
     description: "Add a note node to the networked knowledge graph (dsh-notemap). Returns the created node.",
@@ -558,6 +666,10 @@ function apply(ctx) {
   }));
 }
 function dispose() {
+  try {
+    disposeUi();
+  } catch {
+  }
   closeStore();
 }
 export {

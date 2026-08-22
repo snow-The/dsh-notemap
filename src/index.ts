@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
@@ -6,9 +7,10 @@ import {
 
 export const name = 'dsh-notemap';
 
-export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): void {
+export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
+  void registerUi(ctx);
 
   reg(defineTool({
     name: 'notemap_add',
@@ -152,5 +154,6 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 }
 
 export function dispose(): void {
+  try { disposeUi(); } catch { /* noop */ }
   closeStore();
 }

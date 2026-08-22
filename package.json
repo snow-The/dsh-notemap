@@ -1,18 +1,47 @@
 {
   "name": "@snow-the/dsh-notemap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Networked knowledge graph for DeepSeek Harness: infinite canvas of notes with quantified relations (weights/confidence), graph algorithms (BFS/DFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots + change streams, cytoscape-compatible JSON export.",
   "type": "module",
   "main": "./dist/index.js",
   "license": "MIT",
-  "keywords": ["dsh", "dsh-plugin", "graph", "notebook", "knowledge", "notemap", "deepseek-harness"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "graph",
+    "notebook",
+    "knowledge",
+    "notemap",
+    "deepseek-harness"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning",
     "test": "node --test"
   },
-  "files": ["dist", "cordis.patch.yml", "LICENSE", "README.md"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "repository": { "type": "git", "url": "https://github.com/snow-The/dsh-notemap.git" },
+  "files": [
+    "dist",
+    "client.js",
+    "web",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "immediately": false
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snow-The/dsh-notemap.git"
+  },
   "types": "./dist/index.d.ts",
   "dependencies": {},
   "devDependencies": {
