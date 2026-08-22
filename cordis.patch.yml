@@ -1,0 +1,9 @@
+## name: dsh-notemap
+
+patch:
+  - insert:
+      id: dsh-notemap
+      name: dsh-notemap
+      index: 800
+      entries:
+        - '@snow-the/dsh-notemap'
