@@ -1,14 +1,12 @@
-// dsh-notemap client — header.actions slot entry via official slots API (React-rendered,
-// survives React reconciliation, unlike raw DOM injection which React clears on rerender).
-const react = require("react");
-const jsx = require("react/jsx-runtime");
-
+// dsh-notemap client — header.actions slot entry via official slots API (React-rendered).
+// require() must live INSIDE the factory (factory receives require as parameter).
 window.__ModuleLoader__.load({
   id: "@snow-the/dsh-notemap",
-  factory: () => {
+  factory: (require) => {
     const module = { exports: {} };
+    const react = require("react");
+    const jsx = require("react/jsx-runtime");
 
-    // health marker: set as soon as this client executes (guide_boot uiChecks target)
     document.documentElement.setAttribute("data-notemap-mounted", "");
 
     const openNotemap = () => {
@@ -16,7 +14,7 @@ window.__ModuleLoader__.load({
       if (!w) window.location.href = "/notemap/";
     };
 
-    const HeaderButton = (props) => jsx.jsx("button", {
+    const HeaderButton = () => jsx.jsx("button", {
       type: "button",
       "data-notemap-anchor": "true",
       title: "打开图谱视图(notemap)",
