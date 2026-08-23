@@ -1,5 +1,5 @@
-// dsh-notemap client — injects a side-map panel into the DSH web app
-// Official mechanism: window.__ModuleLoader__.load({ id, factory })
+// dsh-notemap client — injects a Lit-based side-map panel into the DSH web app
+// Lit shadow DOM isolates ALL styles/IDs — zero collision with other UI plugins (web-ui-all etc.)
 window.__ModuleLoader__.load({
   id: 'dsh-notemap',
   factory: () => {
@@ -7,33 +7,18 @@ window.__ModuleLoader__.load({
 
     module.exports.inject = ['sessions'];
 
-    module.exports.apply = (ctx) => {
-      // ---- styles (dsh-notemap- prefixed to avoid clashing with web-ui-all) ----
-      const style = document.createElement('style');
-      style.textContent = [
-        '.dsh-notemap-toggle{position:fixed;top:118px;right:0;z-index:9000;width:34px;height:34px;border:1px solid #d1d5db;border-left:0;border-radius:0 9px 9px 0;background:rgba(255,255,255,.97);color:#4b5563;font-size:14px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:0}',
-        '.dsh-notemap-toggle:hover{background:#f3f4f6;color:#111827}',
-        '.dsh-notemap-panel{position:fixed;top:0;right:0;bottom:0;width:min(46vw,720px);min-width:340px;z-index:8999;background:#f8fafc;border-left:1px solid #e2e8f0;box-shadow:-8px 0 28px rgba(0,0,0,.16);display:flex;flex-direction:column;transition:transform .2s ease}',
-        '.dsh-notemap-panel[hidden]{display:none}',
-        '.dsh-notemap-panel-head{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #e2e8f0;background:#fff;font:600 13px Inter,system-ui,sans-serif;color:#1e293b}',
-        '.dsh-notemap-panel-head button{margin-left:auto;border:0;background:none;font-size:15px;cursor:pointer;color:#6b7280}',
-        '.dsh-notemap-panel iframe{flex:1;border:0;width:100%;background:#fff}'
-      ].join('');
-      document.head.append(style);
+    module.exports.apply = async (ctx) => {
+      // ---- load Lit bundle (single-file, pre-built, committed to repo) ----
+      let panel = null;
+      try {
+        const mod = await import('/notemap/lit.bundle.js');
+        panel = mod.mount(document.body);
+      } catch (err) {
+        console.error('[dsh-notemap] lit bundle load failed', err);
+        return;
+      }
 
-      // ---- host DOM ----
-      const host = document.createElement('div');
-      host.className = 'dsh-notemap-host';
-      host.innerHTML = [
-        '<button type="button" class="dsh-notemap-toggle" title="Knowledge map (dsh-notemap)">🧠</button>',
-        '<section class="dsh-notemap-panel" hidden><div class="dsh-notemap-panel-head"><span>🧠 Notemap</span><button type="button" title="Close">✕</button></div><iframe title="dsh-notemap canvas" src="/notemap/"></iframe></section>'
-      ].join('');
-      document.body.append(host);
-      const toggle = host.querySelector('.dsh-notemap-toggle');
-      const panel = host.querySelector('.dsh-notemap-panel');
-      const frame = panel.querySelector('iframe');
-      const closeBtn = panel.querySelector('.dsh-notemap-panel-head button');
-
+      const frame = panel.frame;
       const send = (type, payload) => {
         frame.contentWindow?.postMessage({ source: 'dsh-notemap', type, ...payload }, location.origin);
       };
@@ -47,7 +32,7 @@ window.__ModuleLoader__.load({
         }).catch(() => {});
       };
 
-      // ---- session event projection: user/assistant messages + todos become graph nodes ----
+      // ---- session event projection: user/assistant messages become graph nodes ----
       let lastSeq = 0;
       const projectSession = (sessionId) => {
         const scope = ctx.sessions.scope(sessionId);
@@ -76,7 +61,6 @@ window.__ModuleLoader__.load({
         if (events.length) projectEvents(events);
       };
 
-      // subscribe to live session state; debounce a bit
       let timer = 0;
       const liveUnsubscribers = new Map();
       const sync = () => {
@@ -102,25 +86,13 @@ window.__ModuleLoader__.load({
       }
       sync();
 
-      // ---- toggle ----
-      const open = () => {
-        panel.hidden = false;
-        sync();
-        send('notemap:open', {});
-      };
-      const close = () => { panel.hidden = true; };
-      toggle.addEventListener('click', () => {
-        if (panel.hidden) open(); else close();
-      });
-      closeBtn.addEventListener('click', close);
-
       // ---- postMessage bridge (origin-checked) ----
       window.addEventListener('message', (ev) => {
         if (ev.origin !== location.origin) return;
         if (ev.data?.source !== 'dsh-notemap') return;
         const type = ev.data.type;
         if (type === 'notemap:graph-changed') {
-          if (!panel.hidden) send('notemap:refresh', {});
+          if (panel.open) send('notemap:refresh', {});
         }
       });
 
@@ -128,11 +100,10 @@ window.__ModuleLoader__.load({
       return () => {
         for (const unsubscribe of liveUnsubscribers.values()) unsubscribe();
         liveUnsubscribers.clear();
-        host.remove();
-        style.remove();
+        panel?.remove();
       };
     };
 
-    return module.exports;
+    return module;
   },
 });

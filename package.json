@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-notemap",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Networked knowledge graph for DeepSeek Harness: infinite canvas of notes with quantified relations (weights/confidence), graph algorithms (BFS/DFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots + change streams, cytoscape-compatible JSON export.",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,7 @@
     "deepseek-harness"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning",
+    "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning && esbuild web/components.js --bundle --format=esm --outfile=web/lit.bundle.js --log-level=warning",
     "test": "node --test"
   },
   "files": [
@@ -43,10 +43,10 @@
     "url": "https://github.com/snow-The/dsh-notemap.git"
   },
   "types": "./dist/index.d.ts",
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^26.2.0",
     "esbuild": "^0.28.2",
+    "lit": "^3.3.3",
     "typescript": "^7.0.2"
   }
 }
