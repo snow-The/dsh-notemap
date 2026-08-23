@@ -34,8 +34,10 @@ window.__ModuleLoader__.load({
         if (hidden) send('notemap:refresh', {});
       };
       const ensureHeaderButton = () => {
-        const host = document.querySelector('[data-slot="conversation.session.header.actions"]');
-        if (!host || host.querySelector('[data-notemap-anchor]')) return;
+        const host = document.querySelector('[data-slot="conversation.session.header"]');
+        if (!host) return;
+        const bar = host.querySelector('header') || host;
+        if (bar.querySelector('[data-notemap-anchor]')) return;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.dataset.notemapAnchor = 'true';
@@ -44,7 +46,7 @@ window.__ModuleLoader__.load({
         btn.textContent = '图谱';
         btn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--ds-border, #444);border-radius:6px;background:transparent;color:inherit;font-size:12px;cursor:pointer;line-height:1.6;';
         btn.addEventListener('click', togglePanel);
-        host.appendChild(btn);
+        bar.appendChild(btn);
       };
       headerObserver = new MutationObserver(ensureHeaderButton);
       headerObserver.observe(document.body, { childList: true, subtree: true });
