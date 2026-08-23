@@ -441,6 +441,9 @@ function linkNotes(args) {
 function removeNote(id) {
   return getStore().removeNode(id);
 }
+function unlinkNotes(args) {
+  return getStore().removeEdge(args.source, args.target, args.type ?? "related");
+}
 function clearAll() {
   return getStore().clearAll();
 }
@@ -525,6 +528,11 @@ async function apiHandler(req, res) {
       sendJson(res, linkNotes({ source: String(body.source), target: String(body.target), type: body.type, weight: body.weight, confidence: body.confidence }));
       return;
     }
+    if (route === "/unlink" && method === "POST") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      sendJson(res, { unlinked: unlinkNotes({ source: String(body.source), target: String(body.target), type: body.type }) });
+      return;
+    }
     if (route === "/project" && method === "POST") {
       const body = JSON.parse(await readBody(req) || "{}");
       const events = Array.isArray(body.events) ? body.events : [];
@@ -595,6 +603,12 @@ async function registerUi(ctx) {
   } });
   ws.register({ kind: "exact", path: "/notemap/styles.css", handler: async (_req, res) => {
     sendFile(res, "text/css; charset=utf-8", await read("styles.css"));
+  } });
+  ws.register({ kind: "exact", path: "/notemap/litegraph.js", handler: async (_req, res) => {
+    sendFile(res, "text/javascript; charset=utf-8", await read("litegraph.js"));
+  } });
+  ws.register({ kind: "exact", path: "/notemap/litegraph.css", handler: async (_req, res) => {
+    sendFile(res, "text/css; charset=utf-8", await read("litegraph.css"));
   } });
   ws.register({ kind: "prefix", path: "/notemap/api", handler: apiHandler });
 }

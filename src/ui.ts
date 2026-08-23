@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { exportGraph, findRelated, graphStats, addNote, linkNotes, searchNotes, closeStore, removeNote, clearAll } from './notemap.ts';
+import { exportGraph, findRelated, graphStats, addNote, linkNotes, searchNotes, closeStore, removeNote, clearAll, unlinkNotes } from './notemap.ts';
 import { importSessions } from './index.ts';
 
 export interface UiCtx {
@@ -52,6 +52,11 @@ async function apiHandler(req: any, res: Res): Promise<void> {
     if (route === '/link' && method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
       sendJson(res, linkNotes({ source: String(body.source), target: String(body.target), type: body.type, weight: body.weight, confidence: body.confidence }));
+      return;
+    }
+    if (route === '/unlink' && method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      sendJson(res, { unlinked: unlinkNotes({ source: String(body.source), target: String(body.target), type: body.type }) });
       return;
     }
     if (route === '/project' && method === 'POST') {
@@ -111,6 +116,8 @@ export async function registerUi(ctx: UiCtx): Promise<void> {
   ws.register({ kind: 'exact', path: '/notemap/app.js', handler: async (_req: any, res: Res) => { sendFile(res, 'text/javascript; charset=utf-8', await read('app.js')); } });
   ws.register({ kind: 'exact', path: '/notemap/lit.bundle.js', handler: async (_req: any, res: Res) => { sendFile(res, 'text/javascript; charset=utf-8', await read('lit.bundle.js')); } });
   ws.register({ kind: 'exact', path: '/notemap/styles.css', handler: async (_req: any, res: Res) => { sendFile(res, 'text/css; charset=utf-8', await read('styles.css')); } });
+  ws.register({ kind: 'exact', path: '/notemap/litegraph.js', handler: async (_req: any, res: Res) => { sendFile(res, 'text/javascript; charset=utf-8', await read('litegraph.js')); } });
+  ws.register({ kind: 'exact', path: '/notemap/litegraph.css', handler: async (_req: any, res: Res) => { sendFile(res, 'text/css; charset=utf-8', await read('litegraph.css')); } });
   ws.register({ kind: 'prefix', path: '/notemap/api', handler: apiHandler });
 }
 

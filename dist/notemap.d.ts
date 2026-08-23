@@ -17,6 +17,11 @@ export declare function linkNotes(args: {
     meta?: Record<string, unknown>;
 }): EdgeRecord;
 export declare function removeNote(id: string): boolean;
+export declare function unlinkNotes(args: {
+    source: string;
+    target: string;
+    type?: string;
+}): boolean;
 export declare function clearAll(): {
     nodes: number;
     edges: number;

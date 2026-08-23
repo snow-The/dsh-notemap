@@ -31,6 +31,10 @@ export function removeNote(id: string): boolean {
   return getStore().removeNode(id);
 }
 
+export function unlinkNotes(args: { source: string; target: string; type?: string }): boolean {
+  return getStore().removeEdge(args.source, args.target, args.type ?? 'related');
+}
+
 export function clearAll(): { nodes: number; edges: number } {
   return getStore().clearAll();
 }

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dsh-notemap · infinite canvas</title>
 <link rel="stylesheet" href="/notemap/styles.css">
+<link rel="stylesheet" href="/notemap/litegraph.css">
 </head>
 <body>
 <div id="nm-toolbar">
@@ -18,7 +19,8 @@
 <span id="nm-count"></span>
 </div>
 <div id="nm-stage"><canvas id="nm-canvas"></canvas></div>
-<div id="nm-inspector" hidden><button id="nm-inspector-close" title="Close">×</button><h3 id="nm-inspector-title"></h3><div id="nm-inspector-body"></div><div id="nm-inspector-related"></div></div>
+<div id="nm-inspector" hidden><button id="nm-inspector-close" title="Close">×</button><h3 id="nm-inspector-title"></h3><div id="nm-inspector-body"></div><div id="nm-inspector-related"></div><button id="nm-inspector-delete" style="margin-top:8px;border:1px solid #fca5a5;background:#fef2f2;color:#b91c1c;border-radius:6px;padding:4px 10px;cursor:pointer;">🗑 删除节点</button></div>
+<script src="/notemap/litegraph.js"></script>
 <script src="/notemap/app.js"></script>
 </body>
 </html>
