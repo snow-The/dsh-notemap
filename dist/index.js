@@ -682,7 +682,18 @@ async function importSessions(opts) {
     const base = f.split(/[\\/]/).pop() ?? f;
     const fileKey = hash(f);
     const sessId = "sess:" + fileKey;
-    const title = "session: " + base.replace(/\.zstd$/, "").slice(0, 40);
+    let sessTitle = "";
+    for (const line of lines) {
+      try {
+        const ev = JSON.parse(line);
+        if (ev?.type === "session/title" && ev?.data?.title) {
+          sessTitle = String(ev.data.title).slice(0, 60);
+          break;
+        }
+      } catch {
+      }
+    }
+    const title = sessTitle || "session: " + base.replace(/\.zstd$/, "").slice(0, 40);
     const chkNodes = [];
     const evtNodes = [];
     let chkIdx = 0, evtIdx = 0;
@@ -693,10 +704,19 @@ async function importSessions(opts) {
       } catch {
         continue;
       }
-      const m = ev?.message ?? ev;
+      const evType = ev?.type ?? "";
+      const m = ev?.message;
       let c;
       if (typeof m === "string") c = m;
       else if (m && typeof m.content === "string") c = m.content;
+      else {
+        const d = ev?.data;
+        if (d && Array.isArray(d.content)) {
+          c = d.content.filter((b) => b && typeof b.text === "string").map((b) => b.text).join("\n");
+        } else if (d && typeof d.text === "string") {
+          c = d.text;
+        }
+      }
       if (!c || c.length < 20) continue;
       if (c.startsWith(RT_CTX)) continue;
       if (SKIP_PREFIXES.some((p) => c.startsWith(p))) continue;
@@ -710,7 +730,7 @@ async function importSessions(opts) {
         checkpoints++;
       } else if (c.includes("system-reminder") || c.startsWith("<") && c.includes(">")) {
         continue;
-      } else {
+      } else if (evType === "user/message" || evType === "") {
         const clean = cleanText(c);
         if (clean.length < 8) continue;
         const id = "evt:" + fileKey + ":" + evtIdx++;
