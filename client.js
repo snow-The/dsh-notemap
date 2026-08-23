@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
       const bar = document.createElement("div");
       bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--ds-border, rgba(128,128,128,.25));flex:none;cursor:grab;user-select:none;";
       bar.title = "拖拽移动窗口";
-      bar.innerHTML = '<span style="font-size:13px;font-weight:600;flex:1;color:inherit;">🧠 知识图谱 · notemap</span>';
+      bar.innerHTML = '<span style="font-size:13px;font-weight:600;flex:1;color:inherit;">🧠 知识图谱</span>';
       const close = document.createElement("button");
       close.type = "button";
       close.textContent = "×";

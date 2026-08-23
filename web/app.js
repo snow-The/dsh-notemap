@@ -21,6 +21,7 @@
 
   // ---- custom node type: one knowledge note ----
   function NoteNode() {
+    LiteGraph.LGraphNode.call(this); // REQUIRED: initializes properties/inputs/outputs
     this.addInput('in', 'flow');
     this.addOutput('out', 'flow');
     this.size = [240, 64];
@@ -35,6 +36,8 @@
   canvas.background_image = null;
   canvas.clear_background = true;
   canvas.render_canvas_border = false;
+  canvas.show_info = false;               // no T/I/N/V/FPS debug overlay
+  canvas.background = '#f8fafc';          // light canvas, matches page
   canvas.default_connection_color = '#6366f1';
   canvas.links_render_mode = LiteGraph.SPLINE_CURVE;
 

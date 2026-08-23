@@ -650,7 +650,7 @@ var NotemapPanel = class extends i4 {
     return b2`
       <button class="toggle" title="Knowledge map (dsh-notemap)" @click=${this.toggle}>🧠</button>
       <section class="window ${this.open ? "open" : ""}">
-        <div class="head"><span>🧠 知识图谱 · notemap</span>
+        <div class="head"><span>🧠 知识图谱</span>
           <button title="Close" @click=${() => this.open = false}>✕</button></div>
         <iframe title="dsh-notemap canvas" src="/notemap/"></iframe>
         <div class="grip"></div>
