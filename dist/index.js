@@ -146,10 +146,24 @@ var GraphStore = class {
     return rows.map((r) => this.rowToNode(r));
   }
   searchNodes(q, limit = 20) {
-    const like = "%" + q + "%";
+    const tokens = q.split(/[\s，。、；：！？,.!?;:()（）"'\[\]{}]+/).filter(Boolean);
+    if (tokens.length === 0) return [];
+    const params = [];
+    const conds = [];
+    for (const t of tokens) {
+      const like = "%" + t + "%";
+      conds.push("(title LIKE ? OR content LIKE ?)");
+      params.push(like, like);
+    }
+    const score = conds.map(() => "CASE WHEN title LIKE ? OR content LIKE ? THEN 1 ELSE 0 END").join(" + ");
+    for (const t of tokens) {
+      const like = "%" + t + "%";
+      params.push(like, like);
+    }
+    params.push(String(limit));
     const rows = this.db.prepare(
-      "SELECT * FROM nodes WHERE deleted_at IS NULL AND (title LIKE ? OR content LIKE ?) ORDER BY updated_at DESC LIMIT ?"
-    ).all(like, like, limit);
+      "SELECT * FROM nodes WHERE deleted_at IS NULL AND (" + conds.join(" OR ") + ") ORDER BY (" + score + ") DESC, updated_at DESC LIMIT ?"
+    ).all(...params);
     return rows.map((r) => this.rowToNode(r));
   }
   // ---------- edge CRUD ----------
