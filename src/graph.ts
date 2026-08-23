@@ -138,7 +138,9 @@ export class GraphStore {
     const id = opts.id ?? crypto.randomUUID();
     const t = nowIso();
     this.db.prepare(
-      'INSERT INTO nodes (id, type, title, content, embedding, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO nodes (id, type, title, content, embedding, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+      + 'ON CONFLICT(id) DO UPDATE SET type = excluded.type, title = excluded.title, content = excluded.content, '
+      + 'embedding = excluded.embedding, meta = excluded.meta, updated_at = excluded.updated_at, deleted_at = NULL'
     ).run(id, opts.type ?? 'note', opts.title, opts.content ?? '', encodeEmbedding(opts.embedding ?? null), JSON.stringify(opts.meta ?? {}), t, t);
     return this.getNode(id)!;
   }
@@ -176,7 +178,19 @@ export class GraphStore {
 
   removeNode(id: string): boolean {
     const r = this.db.prepare('UPDATE nodes SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(nowIso(), nowIso(), id);
+    if (r.changes > 0) {
+      this.db.prepare('UPDATE edges SET deleted_at = ? WHERE (source = ? OR target = ?) AND deleted_at IS NULL').run(nowIso(), id, id);
+    }
     return r.changes > 0;
+  }
+
+  /** Soft-delete every node and edge — resets the working graph while keeping snapshots/changes history. */
+  clearAll(): { nodes: number; edges: number } {
+    return this.withTx(() => {
+      const n = Number(this.db.prepare('UPDATE nodes SET deleted_at = ?, updated_at = ? WHERE deleted_at IS NULL').run(nowIso(), nowIso()).changes);
+      const e = Number(this.db.prepare('UPDATE edges SET deleted_at = ? WHERE deleted_at IS NULL').run(nowIso()).changes);
+      return { nodes: n, edges: e };
+    });
   }
 
   listNodes(limit = 100, offset = 0): NodeRecord[] {

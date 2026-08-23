@@ -56,6 +56,11 @@ export declare class GraphStore {
         meta?: Record<string, unknown>;
     }): NodeRecord | null;
     removeNode(id: string): boolean;
+    /** Soft-delete every node and edge — resets the working graph while keeping snapshots/changes history. */
+    clearAll(): {
+        nodes: number;
+        edges: number;
+    };
     listNodes(limit?: number, offset?: number): NodeRecord[];
     searchNodes(q: string, limit?: number): NodeRecord[];
     /** SQL-side processed recall: each hit comes back with its connected neighborhood

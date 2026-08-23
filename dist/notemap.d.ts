@@ -16,6 +16,11 @@ export declare function linkNotes(args: {
     confidence?: number;
     meta?: Record<string, unknown>;
 }): EdgeRecord;
+export declare function removeNote(id: string): boolean;
+export declare function clearAll(): {
+    nodes: number;
+    edges: number;
+};
 export declare function searchNotes(args: {
     q: string;
     limit?: number;

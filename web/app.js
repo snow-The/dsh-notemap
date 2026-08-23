@@ -191,6 +191,42 @@
     void fetch('/notemap/api/add', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) })
       .then(() => load());
   });
+
+  // workspace: import material (paste text/URL -> knowledge node)
+  document.getElementById('nm-import').addEventListener('click', async () => {
+    const text = prompt('导入资料(粘贴文本或 URL):\n\n第一行作为标题,其余作为内容。');
+    if (!text || !text.trim()) return;
+    const lines = text.split('\n');
+    const title = (lines[0] || 'untitled').trim().slice(0, 80);
+    const content = lines.slice(1).join('\n').trim() || text.trim();
+    const type = /^https?:\/\//.test(content.trim()) ? 'link' : 'note';
+    await fetch('/notemap/api/add', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, content, type }) });
+    await load();
+  });
+
+  // workspace: import DSH sessions (checkpoint knowledge extraction)
+  document.getElementById('nm-sessions').addEventListener('click', async () => {
+    const btn = document.getElementById('nm-sessions');
+    btn.textContent = '⏳ 提取中…';
+    btn.disabled = true;
+    try {
+      const res = await fetch('/notemap/api/import-session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      alert('已导入: ' + data.sessions + ' 个会话, ' + data.checkpoints + ' 个知识点, ' + data.events + ' 个用户事件(扫描 ' + data.scanned + ' 个文件)');
+    } catch (err) {
+      alert('导入失败: ' + err);
+    }
+    btn.textContent = '🗨 会话';
+    btn.disabled = false;
+    await load();
+  });
+
+  // workspace: clear (needs confirm)
+  document.getElementById('nm-clear').addEventListener('click', async () => {
+    if (!confirm('清空整个知识图谱?(所有节点和边将被删除,快照历史保留)')) return;
+    await fetch('/notemap/api/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
+    await load();
+  });
   document.getElementById('nm-layout').addEventListener('click', () => { layout(); draw(); });
   document.getElementById('nm-fit').addEventListener('click', () => { view = { x: 0, y: 0, scale: 1 }; draw(); });
   document.getElementById('nm-inspector-close').addEventListener('click', () => { inspector.hidden = true; selectedId = null; draw(); });

@@ -17,11 +17,135 @@ import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
+  removeNote, clearAll,
 } from './notemap.ts';
 
 export const name = 'dsh-notemap';
 
 export const inject = ['tools', 'webServer'] as const;
+
+
+// ---------- session import (knowledge extraction) ----------
+// Scans ~/.dsh/sessions/**/session.jsonl.zstd and turns each session into a
+// knowledge subgraph: session node -> checkpoint nodes (ACP-compacted summaries,
+// the highest-density knowledge) + user event nodes (real questions, skipping
+// runtime-context / system-reminder noise). Deterministic ids => idempotent re-import.
+const RT_CTX = 'Current runtime context';
+const CHECKPOINT = 'This is an automatically generated checkpoint';
+const SKIP_PREFIXES = ['<system-reminder>', '<available_skills>', 'The available skill catalog changed'];
+
+function extractSummary(text: string): string {
+  const m = text.match(/<compacted-summary>([\s\S]*?)<\/compacted-summary>/);
+  if (m && m[1] && m[1].trim().length > 10) return m[1].trim();
+  // fallback: everything after the checkpoint banner (before runtime context if present)
+  const rt = text.indexOf(RT_CTX);
+  const body = rt >= 0 ? text.slice(0, rt) : text;
+  const banner = body.indexOf('\n');
+  return banner >= 0 ? body.slice(banner + 1).trim() : body.trim();
+}
+
+function extractTopic(summary: string): string {
+  for (const line of summary.split('\n')) {
+    const t = line.replace(/^#+\s*/, '').replace(/^\*\*/, '').trim();
+    if (t && t.length <= 60) return t;
+  }
+  return summary.slice(0, 60).replace(/\s+/g, ' ').trim();
+}
+
+function cleanText(s: string): string {
+  return s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+export async function importSessions(opts?: { limit?: number; maxLines?: number }): Promise<{
+  scanned: number; sessions: number; checkpoints: number; events: number; imported: string[];
+}> {
+  const { execFileSync } = await import('node:child_process');
+  const { readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { homedir } = await import('node:os');
+  const { createHash } = await import('node:crypto');
+  const hash = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16);
+
+  const root = join(homedir(), '.dsh', 'sessions');
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    let entries: string[] = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name); } catch { return; }
+    for (const name of entries) {
+      const p = join(dir, name);
+      try {
+        if (statSync(p).isDirectory()) walk(p);
+        else if (name.endsWith('.zstd')) files.push(p);
+      } catch { /* skip */ }
+    }
+  };
+  walk(root);
+
+  const limit = opts?.limit ?? 30;
+  const maxLines = opts?.maxLines ?? 2000;
+  const imported: string[] = [];
+  let sessions = 0, checkpoints = 0, events = 0;
+
+  for (const f of files.slice(0, limit)) {
+    let text = '';
+    try {
+      text = execFileSync('zstd', ['-d', '-c', f], { timeout: 20000, encoding: 'utf8', windowsHide: true });
+    } catch {
+      text = ''; // zstd CLI unavailable — still create the session node
+    }
+    const lines = text.split('\n').filter(Boolean).slice(0, maxLines);
+    const base = f.split(/[\\/]/).pop() ?? f;
+    const fileKey = hash(f);
+    const sessId = 'sess:' + fileKey;
+    const title = 'session: ' + base.replace(/\.zstd$/, '').slice(0, 40);
+
+    const chkNodes: string[] = [];
+    const evtNodes: string[] = [];
+    let chkIdx = 0, evtIdx = 0;
+    for (const line of lines) {
+      let ev: any;
+      try { ev = JSON.parse(line); } catch { continue; }
+      const m = ev?.message ?? ev;
+      let c: string | undefined;
+      if (typeof m === 'string') c = m;
+      else if (m && typeof m.content === 'string') c = m.content;
+      if (!c || c.length < 20) continue;
+      if (c.startsWith(RT_CTX)) continue;
+      if (SKIP_PREFIXES.some((p) => c.startsWith(p))) continue;
+
+      if (c.startsWith(CHECKPOINT) || c.includes('compacted-summary')) {
+        const summary = extractSummary(c);
+        if (summary.length < 20) continue;
+        const id = 'chk:' + fileKey + ':' + chkIdx++;
+        const topic = extractTopic(summary);
+        await addNote({ id, title: topic || 'checkpoint ' + chkIdx, content: summary.slice(0, 800), type: 'checkpoint', meta: { file: base } });
+        chkNodes.push(id);
+        checkpoints++;
+      } else if (c.includes('system-reminder') || c.startsWith('<') && c.includes('>')) {
+        continue;
+      } else {
+        const clean = cleanText(c);
+        if (clean.length < 8) continue;
+        const id = 'evt:' + fileKey + ':' + evtIdx++;
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: 'session-event', meta: { file: base } });
+        evtNodes.push(id);
+        events++;
+      }
+    }
+    if (chkNodes.length + evtNodes.length === 0) continue;
+
+    await addNote({ id: sessId, title, content: (chkNodes.length + ' checkpoint(s), ' + evtNodes.length + ' event(s) from ' + base), type: 'session', meta: { file: base } });
+    for (const id of chkNodes) await linkNotes({ source: sessId, target: id, type: 'checkpoint', weight: 1, confidence: 1 });
+    for (const id of evtNodes) await linkNotes({ source: sessId, target: id, type: 'follows', weight: 0.8, confidence: 1 });
+    // chain: last checkpoint -> first event (what the compressed knowledge produced)
+    if (chkNodes.length && evtNodes.length) {
+      await linkNotes({ source: chkNodes[chkNodes.length - 1], target: evtNodes[0], type: 'produces', weight: 0.6, confidence: 0.7 });
+    }
+    sessions++;
+    imported.push(sessId);
+  }
+  return { scanned: files.length, sessions, checkpoints, events, imported };
+}
 
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
   const reg = ctx.tools?.register?.bind(ctx.tools);
@@ -206,56 +330,39 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
 
   reg(defineTool({
     name: 'notemap_import_session',
-    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and import each session as a graph node chain (session = node, sequential sessions linked in order). Uses zstd CLI when available.',
-    parameters: { type: 'object', properties: {}, required: [] },
-    execute: async () => {
-      const { execFileSync } = await import('node:child_process');
-      const { readdirSync, readFileSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      const { homedir } = await import('node:os');
-      const root = join(homedir(), '.dsh', 'sessions');
-      const files: string[] = [];
-      const walk = (dir: string) => {
-        let entries: string[] = [];
-        try { entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name); } catch { return; }
-        for (const name of entries) {
-          const p = join(dir, name);
-          try {
-            if (require('node:fs').statSync(p).isDirectory()) walk(p);
-            else if (name.endsWith('.zstd')) files.push(p);
-          } catch { /* skip */ }
-        }
-      };
-      walk(root);
-      const imported: string[] = [];
-      let prevId: string | null = null;
-      for (const f of files.slice(0, 30)) {
-        let text = '';
-        try {
-          text = execFileSync('zstd', ['-d', '-c', f], { timeout: 15000, encoding: 'utf8', windowsHide: true });
-        } catch {
-          text = ''; // zstd CLI unavailable — skip content, still create the session node
-        }
-        const lines = text.split('\n').filter(Boolean).slice(0, 300);
-        let title = f.split(/[\\/]/).pop() ?? f;
-        let summary = '';
-        for (let i = lines.length - 1; i >= 0 && !summary; i--) {
-          try {
-            const ev = JSON.parse(lines[i]);
-            const m = ev?.message ?? ev;
-            const c = typeof m === 'string' ? m : m?.content;
-            if (typeof c === 'string' && c.length > 20) summary = c.slice(0, 200);
-          } catch { /* skip bad line */ }
-        }
-        const node = await addNote({ title: 'session: ' + title.slice(0, 40), content: summary || '(no readable content)', type: 'session' });
-        const id = (node as any)?.id;
-        if (id) {
-          if (prevId) { try { await linkNotes({ source: prevId, target: id, type: 'next', weight: 1, confidence: 1 }); } catch { /* skip */ } }
-          prevId = id;
-          imported.push(id);
-        }
-      }
-      return { scanned: files.length, imported };
+    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and extract each session into the knowledge graph: session node + checkpoint nodes (ACP-compacted summaries, the real knowledge density) + user event nodes (skipping runtime-context/system noise). Deterministic ids: re-import is idempotent. Uses zstd CLI when available.',
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max session files to import (default 30)' },
+      },
+      required: [],
+    },
+    execute: (args: { limit?: number }) => importSessions({ limit: args?.limit }),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_remove',
+    description: 'Remove a node (and its edges) from the knowledge graph.',
+    parameters: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Node id to remove' } },
+      required: ['id'],
+    },
+    execute: (args: { id: string }) => ({ removed: removeNote(args.id) }),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_clear',
+    description: 'Clear the whole knowledge graph (soft-delete all nodes+edges; snapshots/history kept). Requires confirm=true.',
+    parameters: {
+      type: 'object',
+      properties: { confirm: { type: 'boolean', description: 'Must be true to actually clear' } },
+      required: ['confirm'],
+    },
+    execute: (args: { confirm?: boolean }) => {
+      if (args?.confirm !== true) return { cleared: false, reason: 'confirm=true required' };
+      return { cleared: true, ...clearAll() };
     },
   }));
 }

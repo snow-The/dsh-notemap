@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import { exportGraph, findRelated, graphStats, addNote, linkNotes, searchNotes, closeStore } from './notemap.ts';
+import { exportGraph, findRelated, graphStats, addNote, linkNotes, searchNotes, closeStore, removeNote, clearAll } from './notemap.ts';
+import { importSessions } from './index.ts';
 
 export interface UiCtx {
   webServer?: {
@@ -76,6 +77,22 @@ async function apiHandler(req: any, res: Res): Promise<void> {
     if (route === '/search' && method === 'GET') {
       const q = url.searchParams.get('q') ?? '';
       sendJson(res, searchNotes({ q, limit: 20 }));
+      return;
+    }
+    if (route === '/import-session' && method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      sendJson(res, await importSessions({ limit: body.limit }));
+      return;
+    }
+    if (route === '/remove' && method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      sendJson(res, { removed: removeNote(String(body.id ?? '')) });
+      return;
+    }
+    if (route === '/clear' && method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      if (body.confirm !== true) { sendJson(res, { cleared: false, reason: 'confirm=true required' }); return; }
+      sendJson(res, { cleared: true, ...clearAll() });
       return;
     }
     sendJson(res, { error: 'not found' }, 404);

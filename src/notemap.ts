@@ -27,6 +27,14 @@ export function linkNotes(args: { source: string; target: string; type?: string;
   return getStore().addEdge(args);
 }
 
+export function removeNote(id: string): boolean {
+  return getStore().removeNode(id);
+}
+
+export function clearAll(): { nodes: number; edges: number } {
+  return getStore().clearAll();
+}
+
 export function searchNotes(args: { q: string; limit?: number }): NodeRecord[] {
   return getStore().searchNodes(args.q, args.limit ?? 20);
 }
