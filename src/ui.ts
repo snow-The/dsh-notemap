@@ -92,6 +92,7 @@ export async function registerUi(ctx: UiCtx): Promise<void> {
   ws.register({ kind: 'exact', path: '/notemap', handler: (_req: any, res: Res) => { res.writeHead(302, { location: '/notemap/' }); res.end(); } });
   ws.register({ kind: 'exact', path: '/notemap/', handler: async (_req: any, res: Res) => { sendFile(res, 'text/html; charset=utf-8', await read('index.html')); } });
   ws.register({ kind: 'exact', path: '/notemap/app.js', handler: async (_req: any, res: Res) => { sendFile(res, 'text/javascript; charset=utf-8', await read('app.js')); } });
+  ws.register({ kind: 'exact', path: '/notemap/lit.bundle.js', handler: async (_req: any, res: Res) => { sendFile(res, 'text/javascript; charset=utf-8', await read('lit.bundle.js')); } });
   ws.register({ kind: 'exact', path: '/notemap/styles.css', handler: async (_req: any, res: Res) => { sendFile(res, 'text/css; charset=utf-8', await read('styles.css')); } });
   ws.register({ kind: 'prefix', path: '/notemap/api', handler: apiHandler });
 }

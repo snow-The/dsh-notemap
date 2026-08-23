@@ -518,6 +518,9 @@ async function registerUi(ctx) {
   ws.register({ kind: "exact", path: "/notemap/app.js", handler: async (_req, res) => {
     sendFile(res, "text/javascript; charset=utf-8", await read("app.js"));
   } });
+  ws.register({ kind: "exact", path: "/notemap/lit.bundle.js", handler: async (_req, res) => {
+    sendFile(res, "text/javascript; charset=utf-8", await read("lit.bundle.js"));
+  } });
   ws.register({ kind: "exact", path: "/notemap/styles.css", handler: async (_req, res) => {
     sendFile(res, "text/css; charset=utf-8", await read("styles.css"));
   } });
