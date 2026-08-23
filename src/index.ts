@@ -167,6 +167,93 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
     },
     execute: (args: { a: string; b: string }) => commonNeighbors(args),
   }));
+
+  reg(defineTool({
+    name: 'notemap_commit',
+    description: 'Record the current conversation key point as a graph node (title/content/type) so the canvas accumulates the main-thread decision chain over time.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short title of the key point' },
+        content: { type: 'string', description: 'Facts / decisions / recovery pointers (compact)' },
+        type: { type: 'string', description: 'Node type, default note' },
+      },
+      required: ['title'],
+    },
+    execute: (args: { title: string; content?: string; type?: string }) => addNote(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_recall',
+    description: 'Query the graph and return matching node summaries — use instead of pasting full context; hits are compact and linked.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+      },
+      required: ['query'],
+    },
+    execute: (args: { query: string; limit?: number }) =>
+      (searchNotes({ q: args.query, limit: args.limit ?? 10 }) as any[]).map((n: any) => ({
+        id: n?.id, title: n?.title, type: n?.type, content: (n?.content ?? '').slice(0, 400),
+      })),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_import_session',
+    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and import each session as a graph node chain (session = node, sequential sessions linked in order). Uses zstd CLI when available.',
+    parameters: { type: 'object', properties: {}, required: [] },
+    execute: async () => {
+      const { execFileSync } = await import('node:child_process');
+      const { readdirSync, readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { homedir } = await import('node:os');
+      const root = join(homedir(), '.dsh', 'sessions');
+      const files: string[] = [];
+      const walk = (dir: string) => {
+        let entries: string[] = [];
+        try { entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name); } catch { return; }
+        for (const name of entries) {
+          const p = join(dir, name);
+          try {
+            if (require('node:fs').statSync(p).isDirectory()) walk(p);
+            else if (name.endsWith('.zstd')) files.push(p);
+          } catch { /* skip */ }
+        }
+      };
+      walk(root);
+      const imported: string[] = [];
+      let prevId: string | null = null;
+      for (const f of files.slice(0, 30)) {
+        let text = '';
+        try {
+          text = execFileSync('zstd', ['-d', '-c', f], { timeout: 15000, encoding: 'utf8', windowsHide: true });
+        } catch {
+          text = ''; // zstd CLI unavailable — skip content, still create the session node
+        }
+        const lines = text.split('\n').filter(Boolean).slice(0, 300);
+        let title = f.split(/[\\/]/).pop() ?? f;
+        let summary = '';
+        for (let i = lines.length - 1; i >= 0 && !summary; i--) {
+          try {
+            const ev = JSON.parse(lines[i]);
+            const m = ev?.message ?? ev;
+            const c = typeof m === 'string' ? m : m?.content;
+            if (typeof c === 'string' && c.length > 20) summary = c.slice(0, 200);
+          } catch { /* skip bad line */ }
+        }
+        const node = await addNote({ title: 'session: ' + title.slice(0, 40), content: summary || '(no readable content)', type: 'session' });
+        const id = (node as any)?.id;
+        if (id) {
+          if (prevId) { try { await linkNotes({ source: prevId, target: id, type: 'next', weight: 1, confidence: 1 }); } catch { /* skip */ } }
+          prevId = id;
+          imported.push(id);
+        }
+      }
+      return { scanned: files.length, imported };
+    },
+  }));
 }
 
 export function dispose(): void {

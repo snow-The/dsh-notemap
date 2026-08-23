@@ -1,3 +1,10 @@
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+
 // src/index.ts
 import { defineTool as dshDefineTool } from "@deepseek-ai/dsh-tools";
 
@@ -679,6 +686,103 @@ function apply(ctx) {
       required: ["a", "b"]
     },
     execute: (args) => commonNeighbors(args)
+  }));
+  reg(defineTool({
+    name: "notemap_commit",
+    description: "Record the current conversation key point as a graph node (title/content/type) so the canvas accumulates the main-thread decision chain over time.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short title of the key point" },
+        content: { type: "string", description: "Facts / decisions / recovery pointers (compact)" },
+        type: { type: "string", description: "Node type, default note" }
+      },
+      required: ["title"]
+    },
+    execute: (args) => addNote(args)
+  }));
+  reg(defineTool({
+    name: "notemap_recall",
+    description: "Query the graph and return matching node summaries \u2014 use instead of pasting full context; hits are compact and linked.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        limit: { type: "number", description: "Max results (default 10)" }
+      },
+      required: ["query"]
+    },
+    execute: (args) => searchNotes({ q: args.query, limit: args.limit ?? 10 }).map((n) => ({
+      id: n?.id,
+      title: n?.title,
+      type: n?.type,
+      content: (n?.content ?? "").slice(0, 400)
+    }))
+  }));
+  reg(defineTool({
+    name: "notemap_import_session",
+    description: "Scan ~/.dsh/sessions/**/session.jsonl.zstd and import each session as a graph node chain (session = node, sequential sessions linked in order). Uses zstd CLI when available.",
+    parameters: { type: "object", properties: {}, required: [] },
+    execute: async () => {
+      const { execFileSync } = await import("node:child_process");
+      const { readdirSync, readFileSync } = await import("node:fs");
+      const { join: join2 } = await import("node:path");
+      const { homedir } = await import("node:os");
+      const root = join2(homedir(), ".dsh", "sessions");
+      const files = [];
+      const walk = (dir) => {
+        let entries = [];
+        try {
+          entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name);
+        } catch {
+          return;
+        }
+        for (const name2 of entries) {
+          const p = join2(dir, name2);
+          try {
+            if (__require("node:fs").statSync(p).isDirectory()) walk(p);
+            else if (name2.endsWith(".zstd")) files.push(p);
+          } catch {
+          }
+        }
+      };
+      walk(root);
+      const imported = [];
+      let prevId = null;
+      for (const f of files.slice(0, 30)) {
+        let text = "";
+        try {
+          text = execFileSync("zstd", ["-d", "-c", f], { timeout: 15e3, encoding: "utf8", windowsHide: true });
+        } catch {
+          text = "";
+        }
+        const lines = text.split("\n").filter(Boolean).slice(0, 300);
+        let title = f.split(/[\\/]/).pop() ?? f;
+        let summary = "";
+        for (let i = lines.length - 1; i >= 0 && !summary; i--) {
+          try {
+            const ev = JSON.parse(lines[i]);
+            const m = ev?.message ?? ev;
+            const c = typeof m === "string" ? m : m?.content;
+            if (typeof c === "string" && c.length > 20) summary = c.slice(0, 200);
+          } catch {
+          }
+        }
+        const node = await addNote({ title: "session: " + title.slice(0, 40), content: summary || "(no readable content)", type: "session" });
+        const id = node?.id;
+        if (id) {
+          if (prevId) {
+            try {
+              await linkNotes({ source: prevId, target: id, type: "next", weight: 1, confidence: 1 });
+            } catch {
+            }
+          }
+          prevId = id;
+          imported.push(id);
+        }
+      }
+      return { scanned: files.length, imported };
+    }
   }));
 }
 function dispose() {
