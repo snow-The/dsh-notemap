@@ -133,6 +133,6 @@ window.__ModuleLoader__.load({
       };
     };
 
-    return module;
+    return module.exports;
   },
 });
