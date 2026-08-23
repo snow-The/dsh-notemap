@@ -58,6 +58,18 @@ export declare class GraphStore {
     removeNode(id: string): boolean;
     listNodes(limit?: number, offset?: number): NodeRecord[];
     searchNodes(q: string, limit?: number): NodeRecord[];
+    /** SQL-side processed recall: each hit comes back with its connected neighborhood
+     *  aggregated in one query (JSON array of related nodes + edge weights) and a
+     *  compact snippet around the best-matching term — a ready-to-read knowledge pack. */
+    searchWithContext(q: string, limit?: number): {
+        node: NodeRecord;
+        neighbors: {
+            id: string;
+            type: string;
+            weight: number;
+        }[];
+        snippet: string;
+    }[];
     addEdge(opts: {
         source: string;
         target: string;

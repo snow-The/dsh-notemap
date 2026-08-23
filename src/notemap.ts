@@ -31,6 +31,10 @@ export function searchNotes(args: { q: string; limit?: number }): NodeRecord[] {
   return getStore().searchNodes(args.q, args.limit ?? 20);
 }
 
+export function searchWithContext(args: { q: string; limit?: number }) {
+  return getStore().searchWithContext(args.q, args.limit ?? 10);
+}
+
 export function findPaths(args: { from: string; to: string }): string[] | null {
   return getStore().shortestPath(args.from, args.to);
 }

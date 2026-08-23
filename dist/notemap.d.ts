@@ -20,6 +20,18 @@ export declare function searchNotes(args: {
     q: string;
     limit?: number;
 }): NodeRecord[];
+export declare function searchWithContext(args: {
+    q: string;
+    limit?: number;
+}): {
+    node: NodeRecord;
+    neighbors: {
+        id: string;
+        type: string;
+        weight: number;
+    }[];
+    snippet: string;
+}[];
 export declare function findPaths(args: {
     from: string;
     to: string;

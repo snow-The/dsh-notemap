@@ -146,25 +146,44 @@ var GraphStore = class {
     return rows.map((r) => this.rowToNode(r));
   }
   searchNodes(q, limit = 20) {
+    return this.searchWithContext(q, limit).map((h) => h.node);
+  }
+  /** SQL-side processed recall: each hit comes back with its connected neighborhood
+   *  aggregated in one query (JSON array of related nodes + edge weights) and a
+   *  compact snippet around the best-matching term — a ready-to-read knowledge pack. */
+  searchWithContext(q, limit = 20) {
     const tokens = q.split(/[\s，。、；：！？,.!?;:()（）"'\[\]{}]+/).filter(Boolean);
     if (tokens.length === 0) return [];
     const params = [];
     const conds = [];
     for (const t of tokens) {
       const like = "%" + t + "%";
-      conds.push("(title LIKE ? OR content LIKE ?)");
+      conds.push("(n.title LIKE ? OR n.content LIKE ?)");
       params.push(like, like);
     }
-    const score = conds.map(() => "CASE WHEN title LIKE ? OR content LIKE ? THEN 1 ELSE 0 END").join(" + ");
+    const score = conds.map(() => "CASE WHEN n.title LIKE ? OR n.content LIKE ? THEN 1 ELSE 0 END").join(" + ");
     for (const t of tokens) {
       const like = "%" + t + "%";
       params.push(like, like);
     }
     params.push(String(limit));
     const rows = this.db.prepare(
-      "SELECT * FROM nodes WHERE deleted_at IS NULL AND (" + conds.join(" OR ") + ") ORDER BY (" + score + ") DESC, updated_at DESC LIMIT ?"
+      "SELECT n.*, (SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight))   FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json FROM nodes n WHERE n.deleted_at IS NULL AND (" + conds.join(" OR ") + ") ORDER BY (" + score + ") DESC, n.updated_at DESC LIMIT ?"
     ).all(...params);
-    return rows.map((r) => this.rowToNode(r));
+    const out = [];
+    for (const r of rows) {
+      const node = this.rowToNode(r);
+      let neighbors = [];
+      try {
+        neighbors = JSON.parse(String(r.neighbors_json ?? "[]"));
+      } catch {
+      }
+      const needle = tokens.find((t) => node.title.includes(t)) ?? tokens.find((t) => node.content.includes(t)) ?? tokens[0];
+      const i = node.content.indexOf(needle);
+      const snippet = i >= 0 ? node.content.slice(Math.max(0, i - 40), i + 120) : node.content.slice(0, 140);
+      out.push({ node, neighbors, snippet: snippet.replace(/\s+/g, " ").trim() });
+    }
+    return out;
   }
   // ---------- edge CRUD ----------
   addEdge(opts) {
@@ -417,6 +436,9 @@ function linkNotes(args) {
 }
 function searchNotes(args) {
   return getStore().searchNodes(args.q, args.limit ?? 20);
+}
+function searchWithContext(args) {
+  return getStore().searchWithContext(args.q, args.limit ?? 10);
 }
 function findPaths(args) {
   return getStore().shortestPath(args.from, args.to);
@@ -726,11 +748,12 @@ function apply(ctx) {
       },
       required: ["query"]
     },
-    execute: (args) => searchNotes({ q: args.query, limit: args.limit ?? 10 }).map((n) => ({
-      id: n?.id,
-      title: n?.title,
-      type: n?.type,
-      content: (n?.content ?? "").slice(0, 400)
+    execute: (args) => searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h) => ({
+      id: h.node?.id,
+      title: h.node?.title,
+      type: h.node?.type,
+      snippet: h.snippet,
+      linked: (h.neighbors ?? []).map((nb) => nb.id + " (" + nb.type + " w" + nb.weight + ")").join(", ")
     }))
   }));
   reg(defineTool({

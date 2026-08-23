@@ -185,25 +185,43 @@ export class GraphStore {
   }
 
   searchNodes(q: string, limit = 20): NodeRecord[] {
-    // Tokenize the query (whitespace + common CJK/ASCII punctuation) and match ANY token
-    // (OR semantics — a recall query is a bag of concepts, not a contiguous phrase).
+    return this.searchWithContext(q, limit).map((h) => h.node);
+  }
+
+  /** SQL-side processed recall: each hit comes back with its connected neighborhood
+   *  aggregated in one query (JSON array of related nodes + edge weights) and a
+   *  compact snippet around the best-matching term — a ready-to-read knowledge pack. */
+  searchWithContext(q: string, limit = 20): { node: NodeRecord; neighbors: { id: string; type: string; weight: number }[]; snippet: string }[] {
     const tokens = q.split(/[\s，。、；：！？,.!?;:()（）"'\[\]{}]+/).filter(Boolean);
     if (tokens.length === 0) return [];
     const params: string[] = [];
     const conds: string[] = [];
     for (const t of tokens) {
       const like = '%' + t + '%';
-      conds.push('(title LIKE ? OR content LIKE ?)');
+      conds.push('(n.title LIKE ? OR n.content LIKE ?)');
       params.push(like, like);
     }
-    const score = conds.map(() => 'CASE WHEN title LIKE ? OR content LIKE ? THEN 1 ELSE 0 END').join(' + ');
+    const score = conds.map(() => 'CASE WHEN n.title LIKE ? OR n.content LIKE ? THEN 1 ELSE 0 END').join(' + ');
     for (const t of tokens) { const like = '%' + t + '%'; params.push(like, like); }
     params.push(String(limit));
     const rows = this.db.prepare(
-      'SELECT * FROM nodes WHERE deleted_at IS NULL AND (' + conds.join(' OR ') + ') '
-      + 'ORDER BY (' + score + ') DESC, updated_at DESC LIMIT ?'
+      'SELECT n.*, '
+      + "(SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight)) "
+      + '  FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json '
+      + 'FROM nodes n WHERE n.deleted_at IS NULL AND (' + conds.join(' OR ') + ') '
+      + 'ORDER BY (' + score + ') DESC, n.updated_at DESC LIMIT ?'
     ).all(...params) as Record<string, unknown>[];
-    return rows.map(r => this.rowToNode(r));
+    const out: { node: NodeRecord; neighbors: { id: string; type: string; weight: number }[]; snippet: string }[] = [];
+    for (const r of rows) {
+      const node = this.rowToNode(r);
+      let neighbors: { id: string; type: string; weight: number }[] = [];
+      try { neighbors = JSON.parse(String(r.neighbors_json ?? '[]')); } catch { /* ignore */ }
+      const needle = tokens.find((t) => node.title.includes(t)) ?? tokens.find((t) => node.content.includes(t)) ?? tokens[0];
+      const i = node.content.indexOf(needle);
+      const snippet = i >= 0 ? node.content.slice(Math.max(0, i - 40), i + 120) : node.content.slice(0, 140);
+      out.push({ node, neighbors, snippet: snippet.replace(/\s+/g, ' ').trim() });
+    }
+    return out;
   }
 
   // ---------- edge CRUD ----------

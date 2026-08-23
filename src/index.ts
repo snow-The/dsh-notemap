@@ -15,7 +15,7 @@ const defineTool = (o: any) => {
 };
 import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
-  addNote, linkNotes, searchNotes, findPaths, findRelated, exportGraph,
+  addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
 } from './notemap.ts';
 
@@ -195,8 +195,12 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       required: ['query'],
     },
     execute: (args: { query: string; limit?: number }) =>
-      (searchNotes({ q: args.query, limit: args.limit ?? 10 }) as any[]).map((n: any) => ({
-        id: n?.id, title: n?.title, type: n?.type, content: (n?.content ?? '').slice(0, 400),
+      searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h: any) => ({
+        id: h.node?.id,
+        title: h.node?.title,
+        type: h.node?.type,
+        snippet: h.snippet,
+        linked: (h.neighbors ?? []).map((nb: any) => nb.id + ' (' + nb.type + ' w' + nb.weight + ')').join(', '),
       })),
   }));
 
