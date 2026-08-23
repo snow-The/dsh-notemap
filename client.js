@@ -1,7 +1,7 @@
 // dsh-notemap client — injects a Lit-based side-map panel into the DSH web app
 // Lit shadow DOM isolates ALL styles/IDs — zero collision with other UI plugins (web-ui-all etc.)
 window.__ModuleLoader__.load({
-  id: 'dsh-notemap',
+  id: '@snow-the/dsh-notemap',
   factory: () => {
     const module = { exports: {} };
 
