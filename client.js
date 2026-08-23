@@ -8,6 +8,9 @@ window.__ModuleLoader__.load({
     module.exports.inject = ['sessions'];
 
     module.exports.apply = async (ctx) => {
+      // health marker: set as soon as this client executes, independent of session state
+      // (lets guide_boot uiChecks verify UI mounting from the boot page)
+      document.documentElement.setAttribute('data-notemap-mounted', '');
       // ---- load Lit bundle (single-file, pre-built, committed to repo) ----
       let panel = null;
       try {
