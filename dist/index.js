@@ -532,6 +532,7 @@ function disposeUi() {
 
 // src/index.ts
 var name = "dsh-notemap";
+var inject = ["tools"];
 function apply(ctx) {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
@@ -675,5 +676,6 @@ function dispose() {
 export {
   apply,
   dispose,
+  inject,
   name
 };

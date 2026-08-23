@@ -1,9 +1,7 @@
-## name: dsh-notemap
-
-patch:
-  - insert:
-      id: dsh-notemap
-      name: dsh-notemap
-      index: 800
-      entries:
-        - '@snow-the/dsh-notemap'
+# dsh-notemap - infinite-canvas note map for DeepSeek Harness.
+#
+# Host plugin: registers notemap_* tools + /notemap web routes and a
+# tablist anchor button opening the infinite canvas panel.
+- insert:
+    - id: dsh-notemap
+      name: '@snow-the/dsh-notemap'

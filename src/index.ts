@@ -7,6 +7,8 @@ import {
 
 export const name = 'dsh-notemap';
 
+export const inject = ['tools'] as const;
+
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
