@@ -1,5 +1,5 @@
 // src/index.ts
-import { defineTool } from "@deepseek-ai/dsh-tools";
+import { defineTool as dshDefineTool } from "@deepseek-ai/dsh-tools";
 
 // src/ui.ts
 import { readFile } from "node:fs/promises";
@@ -531,8 +531,20 @@ function disposeUi() {
 }
 
 // src/index.ts
+var defineTool = (o) => {
+  let parameters = o.parameters;
+  const p = o.parameters;
+  if (p && p.type === "object" && p.properties) {
+    const required = new Set(p.required ?? []);
+    parameters = {};
+    for (const [k, v] of Object.entries(p.properties)) {
+      parameters[k] = { ...v, ...required.has(k) ? { required: true } : {} };
+    }
+  }
+  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: "json" }, render: () => [] } });
+};
 var name = "dsh-notemap";
-var inject = ["tools"];
+var inject = ["tools", "webServer"];
 function apply(ctx) {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;

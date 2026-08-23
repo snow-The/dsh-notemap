@@ -1,4 +1,18 @@
-import { defineTool } from '@deepseek-ai/dsh-tools';
+import { defineTool as dshDefineTool } from '@deepseek-ai/dsh-tools';
+// dsh-tools now requires options.output and the property-map parameters DSL;
+// convert legacy JSON-Schema style parameters and default open JSON output.
+const defineTool = (o: any) => {
+  let parameters = o.parameters;
+  const p = o.parameters;
+  if (p && p.type === 'object' && p.properties) {
+    const required = new Set(p.required ?? []);
+    parameters = {};
+    for (const [k, v] of Object.entries(p.properties)) {
+      parameters[k] = { ...(v as any), ...(required.has(k) ? { required: true } : {}) };
+    }
+  }
+  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: 'json' }, render: () => [] } });
+};
 import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, findPaths, findRelated, exportGraph,
@@ -7,7 +21,7 @@ import {
 
 export const name = 'dsh-notemap';
 
-export const inject = ['tools'] as const;
+export const inject = ['tools', 'webServer'] as const;
 
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
   const reg = ctx.tools?.register?.bind(ctx.tools);
