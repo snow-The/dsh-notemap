@@ -19,6 +19,34 @@ window.__ModuleLoader__.load({
       }
 
       const frame = panel.frame;
+
+      // ---- official header.actions slot entry (like dsh-undo-savepoint's UndoHeader) ----
+      // DOM-injected into the official [data-slot] container: no React dependency,
+      // renders next to undo/snapshot buttons, survives better-sidebar re-renders.
+      let headerObserver = null;
+      const togglePanel = () => {
+        if (!frame) return;
+        const hidden = frame.style.display === 'none';
+        frame.style.display = hidden ? '' : 'none';
+        if (hidden) send('notemap:refresh', {});
+      };
+      const ensureHeaderButton = () => {
+        const host = document.querySelector('[data-slot="conversation.session.header.actions"]');
+        if (!host || host.querySelector('[data-notemap-anchor]')) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.notemapAnchor = 'true';
+        btn.title = '打开图谱视图(notemap)';
+        btn.setAttribute('aria-label', '打开图谱视图');
+        btn.textContent = '图谱';
+        btn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--ds-border, #444);border-radius:6px;background:transparent;color:inherit;font-size:12px;cursor:pointer;line-height:1.6;';
+        btn.addEventListener('click', togglePanel);
+        host.appendChild(btn);
+      };
+      headerObserver = new MutationObserver(ensureHeaderButton);
+      headerObserver.observe(document.body, { childList: true, subtree: true });
+      ensureHeaderButton();
+
       const send = (type, payload) => {
         frame.contentWindow?.postMessage({ source: 'dsh-notemap', type, ...payload }, location.origin);
       };
@@ -100,6 +128,7 @@ window.__ModuleLoader__.load({
       return () => {
         for (const unsubscribe of liveUnsubscribers.values()) unsubscribe();
         liveUnsubscribers.clear();
+        headerObserver?.disconnect();
         panel?.remove();
       };
     };

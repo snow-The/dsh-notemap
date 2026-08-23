@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-notemap",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "Networked knowledge graph for DeepSeek Harness: infinite canvas of notes with quantified relations (weights/confidence), graph algorithms (BFS/DFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots + change streams, cytoscape-compatible JSON export.",
   "type": "module",
   "main": "./dist/index.js",
