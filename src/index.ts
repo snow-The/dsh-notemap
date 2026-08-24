@@ -59,17 +59,18 @@ function cleanText(s: string): string {
 
 const IMPORT_VERSION = 2;
 
-export async function importSessions(opts?: { limit?: number; maxLines?: number; force?: boolean }): Promise<{
+export async function importSessions(opts?: { limit?: number; maxLines?: number; force?: boolean; sessionsDir?: string }): Promise<{
   scanned: number; sessions: number; checkpoints: number; events: number; skipped: number; imported: string[];
 }> {
   const { execFileSync } = await import('node:child_process');
-  const { readdirSync, statSync } = await import('node:fs');
+  const { readdirSync, statSync, readFileSync } = await import('node:fs');
+  const { zstdDecompressSync } = await import('node:zlib');
   const { join } = await import('node:path');
   const { homedir } = await import('node:os');
   const { createHash } = await import('node:crypto');
   const hash = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16);
 
-  const root = join(homedir(), '.dsh', 'sessions');
+  const root = opts?.sessionsDir ?? join(homedir(), '.dsh', 'sessions');
   const files: string[] = [];
   const walk = (dir: string) => {
     let entries: string[] = [];
@@ -95,7 +96,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
     try {
       text = execFileSync('zstd', ['-d', '-c', f], { timeout: 20000, encoding: 'utf8', windowsHide: true });
     } catch {
-      text = ''; // zstd CLI unavailable — still create the session node
+      try { text = zstdDecompressSync(readFileSync(f)).toString('utf8'); } catch { text = ''; }
     }
     const lines = text.split('\n').filter(Boolean).slice(0, maxLines);
     const base = f.split(/[\\/]/).pop() ?? f;
@@ -161,7 +162,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
         const summary = extractSummary(c);
         if (summary.length < 20) continue;
         const idx = chkIdx++;
-        if (idx < prevEvents) continue; // event-level watermark: already imported
+        if (idx < prevEvents && !force) continue; // event-level watermark: already imported (force bypasses)
         const id = 'chk:' + fileKey + ':' + idx;
         const topic = extractTopic(summary);
         await addNote({ id, title: topic || 'checkpoint ' + (idx + 1), content: summary.slice(0, 800), type: 'checkpoint', meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
@@ -173,7 +174,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
         const clean = cleanText(c);
         if (clean.length < 8) continue;
         const idx = evtIdx++;
-        if (idx < prevEvents) continue; // event-level watermark: already imported
+        if (idx < prevEvents && !force) continue; // event-level watermark: already imported (force bypasses)
         const id = 'evt:' + fileKey + ':' + idx;
         await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: 'session-event', meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         evtNodes.push(id);

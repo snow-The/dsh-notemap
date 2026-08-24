@@ -1,4 +1,5 @@
-import { GraphStore, NodeRecord, EdgeRecord, nowIso } from './graph.ts';
+import { GraphStore, nowIso } from './graph.ts';
+import type { NodeRecord, EdgeRecord } from './graph.ts';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 

@@ -105,8 +105,16 @@ function buildFilterSql(filter: Record<string, unknown>): { where: string; args:
     }
     if (key.startsWith('meta.')) {
       const metaKey = key.slice(5);
-      args.push(metaKey);
-      parts.push('EXISTS (SELECT 1 FROM json_each(nodes.meta) je WHERE je.key = ? AND ' + cmp('je.value', cond) + ')');
+      const isObj = cond !== null && typeof cond === 'object' && !Array.isArray(cond);
+      if (isObj && 'exists' in (cond as Record<string, unknown>)) {
+        // key presence: json_each with path yields rows only when the key exists
+        parts.push(((cond as Record<string, unknown>).exists ? 'EXISTS' : 'NOT EXISTS') + ' (SELECT 1 FROM json_each(nodes.meta, ?))');
+        args.push('$.' + metaKey);
+      } else {
+        // path-based json_each: scalar values yield 1 row, array values yield one row per element
+        args.push('$.' + metaKey);
+        parts.push('EXISTS (SELECT 1 FROM json_each(nodes.meta, ?) je WHERE ' + cmp('je.value', cond) + ')');
+      }
     } else if (key === 'type' || key === 'title') {
       parts.push(cmp('nodes.' + key, cond));
     }
