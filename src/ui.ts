@@ -86,7 +86,7 @@ async function apiHandler(req: any, res: Res): Promise<void> {
     }
     if (route === '/import-session' && method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
-      sendJson(res, await importSessions({ limit: body.limit }));
+      sendJson(res, await importSessions({ limit: body.limit, force: body.force }));
       return;
     }
     if (route === '/remove' && method === 'POST') {

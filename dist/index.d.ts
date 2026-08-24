@@ -4,11 +4,13 @@ export declare const inject: readonly ['tools', 'webServer'];
 export declare function importSessions(opts?: {
     limit?: number;
     maxLines?: number;
+    force?: boolean;
 }): Promise<{
     scanned: number;
     sessions: number;
     checkpoints: number;
     events: number;
+    skipped: number;
     imported: string[];
 }>;
 export declare function apply(ctx: {

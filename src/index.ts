@@ -17,7 +17,7 @@ import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
-  removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf,
+  removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
 } from './notemap.ts';
 
 export const name = 'dsh-notemap';
@@ -56,8 +56,10 @@ function cleanText(s: string): string {
   return s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-export async function importSessions(opts?: { limit?: number; maxLines?: number }): Promise<{
-  scanned: number; sessions: number; checkpoints: number; events: number; imported: string[];
+const IMPORT_VERSION = 2;
+
+export async function importSessions(opts?: { limit?: number; maxLines?: number; force?: boolean }): Promise<{
+  scanned: number; sessions: number; checkpoints: number; events: number; skipped: number; imported: string[];
 }> {
   const { execFileSync } = await import('node:child_process');
   const { readdirSync, statSync } = await import('node:fs');
@@ -83,8 +85,9 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
 
   const limit = opts?.limit ?? 30;
   const maxLines = opts?.maxLines ?? 2000;
+  const force = opts?.force ?? false;
   const imported: string[] = [];
-  let sessions = 0, checkpoints = 0, events = 0;
+  let sessions = 0, checkpoints = 0, events = 0, skipped = 0;
 
   for (const f of files.slice(0, limit)) {
     let text = '';
@@ -97,6 +100,23 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
     const base = f.split(/[\\/]/).pop() ?? f;
     const fileKey = hash(f);
     const sessId = 'sess:' + fileKey;
+    const fileHash = hash(text);
+
+    // ---- P2: dual watermark (file-level + event-level, idempotent rerun) ----
+    // The session node records the file content hash + how many events were
+    // imported last time. A rerun with an unchanged file and no new events is
+    // skipped entirely (file-level anchor). A changed/appended file only
+    // imports events beyond the previous watermark (event-level anchor).
+    const existing = getStore().getNode(sessId);
+    const prevMeta = (existing?.meta ?? {}) as Record<string, unknown>;
+    const prevHash = String(prevMeta.import_hash ?? '');
+    const prevEvents = Number(prevMeta.imported_events ?? 0);
+    const prevVersion = Number(prevMeta.import_version ?? 0);
+    if (!force && prevHash === fileHash && prevEvents > 0 && prevVersion === IMPORT_VERSION) {
+      skipped++;
+      continue;
+    }
+
     let sessTitle = '';
     for (const line of lines) {
       try {
@@ -106,10 +126,15 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
     }
     const title = sessTitle || 'session: ' + base.replace(/\.zstd$/, '').slice(0, 40);
 
+    // Episode provenance (P2): every extracted node records which file and
+    // which event index it came from, so results are traceable and the
+    // watermark can be verified against the source stream.
+    const episode = { file: base, importVersion: IMPORT_VERSION };
     const chkNodes: string[] = [];
     const evtNodes: string[] = [];
-    let chkIdx = 0, evtIdx = 0;
+    let chkIdx = 0, evtIdx = 0, lineIdx = 0;
     for (const line of lines) {
+      lineIdx++;
       let ev: any;
       try { ev = JSON.parse(line); } catch { continue; }
       // DSH session stream: {"type":"user/message"|"assistant/message",data:{content:[{type:'text',text}]}}
@@ -134,9 +159,11 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
       if (c.startsWith(CHECKPOINT) || c.includes('compacted-summary')) {
         const summary = extractSummary(c);
         if (summary.length < 20) continue;
-        const id = 'chk:' + fileKey + ':' + chkIdx++;
+        const idx = chkIdx++;
+        if (idx < prevEvents) continue; // event-level watermark: already imported
+        const id = 'chk:' + fileKey + ':' + idx;
         const topic = extractTopic(summary);
-        await addNote({ id, title: topic || 'checkpoint ' + chkIdx, content: summary.slice(0, 800), type: 'checkpoint', meta: { file: base } });
+        await addNote({ id, title: topic || 'checkpoint ' + (idx + 1), content: summary.slice(0, 800), type: 'checkpoint', meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         chkNodes.push(id);
         checkpoints++;
       } else if (c.includes('system-reminder') || c.startsWith('<') && c.includes('>')) {
@@ -144,15 +171,23 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
       } else if (evType === 'user/message' || evType === '') {
         const clean = cleanText(c);
         if (clean.length < 8) continue;
-        const id = 'evt:' + fileKey + ':' + evtIdx++;
-        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: 'session-event', meta: { file: base } });
+        const idx = evtIdx++;
+        if (idx < prevEvents) continue; // event-level watermark: already imported
+        const id = 'evt:' + fileKey + ':' + idx;
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: 'session-event', meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         evtNodes.push(id);
         events++;
       }
     }
-    if (chkNodes.length + evtNodes.length === 0) continue;
+    if (chkNodes.length + evtNodes.length === 0 && !existing) continue;
 
-    await addNote({ id: sessId, title, content: (chkNodes.length + ' checkpoint(s), ' + evtNodes.length + ' event(s) from ' + base), type: 'session', meta: { file: base } });
+    // Versioned session node: content hash + event watermark + import version.
+    const totalImported = chkIdx + evtIdx;
+    await addNote({
+      id: sessId, title, type: 'session',
+      content: (chkIdx + ' checkpoint(s), ' + evtIdx + ' event(s) from ' + base),
+      meta: { file: base, import_hash: fileHash, imported_events: totalImported, import_version: IMPORT_VERSION, episode },
+    });
     for (const id of chkNodes) await linkNotes({ source: sessId, target: id, type: 'checkpoint', weight: 1, confidence: 1 });
     for (const id of evtNodes) await linkNotes({ source: sessId, target: id, type: 'follows', weight: 0.8, confidence: 1 });
     // chain: last checkpoint -> first event (what the compressed knowledge produced)
@@ -162,7 +197,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number 
     sessions++;
     imported.push(sessId);
   }
-  return { scanned: files.length, sessions, checkpoints, events, imported };
+  return { scanned: files.length, sessions, checkpoints, events, skipped, imported };
 }
 
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
@@ -415,15 +450,16 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
 
   reg(defineTool({
     name: 'notemap_import_session',
-    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and extract each session into the knowledge graph: session node + checkpoint nodes (ACP-compacted summaries, the real knowledge density) + user event nodes (skipping runtime-context/system noise). Deterministic ids: re-import is idempotent. Uses zstd CLI when available.',
+    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and extract each session into the knowledge graph: session node + checkpoint nodes (ACP-compacted summaries, the real knowledge density) + user event nodes (skipping runtime-context/system noise). Dual watermark (file hash + event count) makes reruns idempotent; force re-imports everything. Uses zstd CLI when available.',
     parameters: {
       type: 'object',
       properties: {
         limit: { type: 'number', description: 'Max session files to import (default 30)' },
+        force: { type: 'boolean', description: 'Re-import even when the file watermark matches (default false)' },
       },
       required: [],
     },
-    execute: (args: { limit?: number }) => importSessions({ limit: args?.limit }),
+    execute: (args: { limit?: number; force?: boolean }) => importSessions({ limit: args?.limit, force: args?.force }),
   }));
 
   reg(defineTool({
