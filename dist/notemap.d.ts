@@ -75,3 +75,29 @@ export declare function commonNeighbors(args: {
     a: string;
     b: string;
 }): string[];
+export declare function subgraphOf(args: {
+    seed: string;
+    maxDepth?: number;
+    maxNodes?: number;
+}): {
+    nodes: NodeRecord[];
+    edges: EdgeRecord[];
+};
+export declare function searchVector(args: {
+    q: string;
+    topK?: number;
+    type?: string;
+}): {
+    node: NodeRecord;
+    score: number;
+}[];
+export declare function setProvider(provider: import('./graph.ts').EmbeddingProvider | null): void;
+export declare function embedAll(batchSize?: number): number;
+export declare function labelsOf(args: {
+    prefix?: string;
+    popular?: boolean;
+    limit?: number;
+}): string[] | {
+    title: string;
+    degree: number;
+}[];

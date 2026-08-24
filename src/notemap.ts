@@ -83,3 +83,24 @@ export function neighborsOf(args: { id: string; dir?: 'out' | 'in' | 'both'; lim
 export function commonNeighbors(args: { a: string; b: string }): string[] {
   return getStore().commonNeighbors(args.a, args.b);
 }
+
+export function subgraphOf(args: { seed: string; maxDepth?: number; maxNodes?: number }) {
+  return getStore().subgraph(args.seed, args.maxDepth ?? 2, args.maxNodes ?? 50);
+}
+
+export function searchVector(args: { q: string; topK?: number; type?: string }): { node: NodeRecord; score: number }[] {
+  return getStore().searchVector(args.q, { topK: args.topK, type: args.type });
+}
+
+export function setProvider(provider: import('./graph.ts').EmbeddingProvider | null): void {
+  getStore().setEmbeddingProvider(provider);
+}
+
+export function embedAll(batchSize?: number): number {
+  return getStore().embedAll(batchSize ?? 64);
+}
+
+export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: number }) {
+  if (args.popular) return getStore().popularLabels(args.limit ?? 20);
+  return getStore().searchLabels(args.prefix ?? '', args.limit ?? 20);
+}

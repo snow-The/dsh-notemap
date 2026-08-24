@@ -22,6 +22,20 @@ export interface EdgeRecord {
   confidence: number;
   meta: Record<string, unknown>;
   created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Optional semantic layer (LightRAG deferred vector indexing / mem0 EmbeddingBase).
+ * Plug in any embedding provider; nothing else changes. When absent, keyword
+ * (FTS5) retrieval still works — vectors are an optional upgrade.
+ */
+export interface EmbeddingProvider {
+  readonly dim: number;
+  /** Embed a batch of texts into float32 vectors (same order). */
+  embed(texts: string[]): Float32Array[];
+  /** Optional model label for stats/debug. */
+  label?: string;
 }
 
 export interface SnapshotInfo {
@@ -37,10 +51,15 @@ export interface PathStep {
 }
 
 // ---------- constants ----------
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // ---------- helpers ----------
 export function nowIso(): string { return new Date().toISOString(); }
+
+/** Normalization contract (LightRAG insert_custom_kg): trim + collapse whitespace + case fold. */
+export function normalizeName(s: string): string {
+  return String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+}
 
 function encodeEmbedding(v: Float32Array | null): Uint8Array | null {
   if (!v) return null;
@@ -98,6 +117,25 @@ export class GraphStore {
       ");",
       "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);",
       "",
+      "ALTER TABLE edges ADD COLUMN updated_at TEXT;",
+      "UPDATE edges SET updated_at = created_at WHERE updated_at IS NULL;",
+      "",
+      "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(",
+      "  title, content,",
+      "  content='nodes', content_rowid='rowid',",
+      "  tokenize='trigram'",
+      ");",
+      "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN",
+      "  INSERT INTO nodes_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);",
+      "END;",
+      "CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN",
+      "  INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES ('delete', old.rowid, old.title, old.content);",
+      "END;",
+      "CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE OF title, content ON nodes BEGIN",
+      "  INSERT INTO nodes_fts(nodes_fts, rowid, title, content) VALUES ('delete', old.rowid, old.title, old.content);",
+      "  INSERT INTO nodes_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);",
+      "END;",
+      "",
       "CREATE TABLE IF NOT EXISTS snapshots (",
       "  snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,",
       "  schema_version INTEGER NOT NULL,",
@@ -135,13 +173,15 @@ export class GraphStore {
 
   // ---------- node CRUD ----------
   addNode(opts: { id?: string; type?: string; title: string; content?: string; embedding?: Float32Array | null; meta?: Record<string, unknown> }): NodeRecord {
+    const title = String(opts.title).replace(/\s+/g, ' ').trim();
+    if (!title) throw new Error('node title cannot be empty after normalization');
     const id = opts.id ?? crypto.randomUUID();
     const t = nowIso();
     this.db.prepare(
       'INSERT INTO nodes (id, type, title, content, embedding, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
       + 'ON CONFLICT(id) DO UPDATE SET type = excluded.type, title = excluded.title, content = excluded.content, '
       + 'embedding = excluded.embedding, meta = excluded.meta, updated_at = excluded.updated_at, deleted_at = NULL'
-    ).run(id, opts.type ?? 'note', opts.title, opts.content ?? '', encodeEmbedding(opts.embedding ?? null), JSON.stringify(opts.meta ?? {}), t, t);
+    ).run(id, opts.type ?? 'note', title, opts.content ?? '', encodeEmbedding(opts.embedding ?? null), JSON.stringify(opts.meta ?? {}), t, t);
     return this.getNode(id)!;
   }
 
@@ -206,31 +246,37 @@ export class GraphStore {
    *  aggregated in one query (JSON array of related nodes + edge weights) and a
    *  compact snippet around the best-matching term — a ready-to-read knowledge pack. */
   searchWithContext(q: string, limit = 20): { node: NodeRecord; neighbors: { id: string; type: string; weight: number }[]; snippet: string }[] {
-    const tokens = q.split(/[\s，。、；：！？,.!?;:()（）"'\[\]{}]+/).filter(Boolean);
-    if (tokens.length === 0) return [];
-    const params: string[] = [];
-    const conds: string[] = [];
-    for (const t of tokens) {
-      const like = '%' + t + '%';
-      conds.push('(n.title LIKE ? OR n.content LIKE ?)');
-      params.push(like, like);
+    const query = String(q).trim();
+    if (!query) return [];
+    // FTS5 trigram handles CJK substring matching; rank by BM25, fall back to LIKE.
+    let rows: Record<string, unknown>[] = [];
+    try {
+      const ftsQuery = query.replace(/"|'/g, ' ').trim().slice(0, 64);
+      rows = this.db.prepare(
+        'SELECT n.*, bm25(nodes_fts, 8.0, 2.0) AS bm25, '
+        + "(SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight)) "
+        + '  FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json '
+        + 'FROM nodes_fts JOIN nodes n ON n.rowid = nodes_fts.rowid '
+        + "WHERE nodes_fts MATCH ? AND n.deleted_at IS NULL "
+        + 'ORDER BY bm25 LIMIT ?'
+      ).all('"' + ftsQuery + '"', limit) as Record<string, unknown>[];
+    } catch { /* trigram/FTS unavailable — fall through to LIKE */ }
+    if (rows.length === 0) {
+      const like = '%' + query + '%';
+      rows = this.db.prepare(
+        'SELECT n.*, 0 AS bm25, '
+        + "(SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight)) "
+        + '  FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json '
+        + 'FROM nodes n WHERE n.deleted_at IS NULL AND (n.title LIKE ? OR n.content LIKE ?) '
+        + 'ORDER BY CASE WHEN n.title LIKE ? THEN 0 ELSE 1 END, n.updated_at DESC LIMIT ?'
+      ).all(like, like, like, limit) as Record<string, unknown>[];
     }
-    const score = conds.map(() => 'CASE WHEN n.title LIKE ? OR n.content LIKE ? THEN 1 ELSE 0 END').join(' + ');
-    for (const t of tokens) { const like = '%' + t + '%'; params.push(like, like); }
-    params.push(String(limit));
-    const rows = this.db.prepare(
-      'SELECT n.*, '
-      + "(SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight)) "
-      + '  FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json '
-      + 'FROM nodes n WHERE n.deleted_at IS NULL AND (' + conds.join(' OR ') + ') '
-      + 'ORDER BY (' + score + ') DESC, n.updated_at DESC LIMIT ?'
-    ).all(...params) as Record<string, unknown>[];
     const out: { node: NodeRecord; neighbors: { id: string; type: string; weight: number }[]; snippet: string }[] = [];
     for (const r of rows) {
       const node = this.rowToNode(r);
       let neighbors: { id: string; type: string; weight: number }[] = [];
       try { neighbors = JSON.parse(String(r.neighbors_json ?? '[]')); } catch { /* ignore */ }
-      const needle = tokens.find((t) => node.title.includes(t)) ?? tokens.find((t) => node.content.includes(t)) ?? tokens[0];
+      const needle = query;
       const i = node.content.indexOf(needle);
       const snippet = i >= 0 ? node.content.slice(Math.max(0, i - 40), i + 120) : node.content.slice(0, 140);
       out.push({ node, neighbors, snippet: snippet.replace(/\s+/g, ' ').trim() });
@@ -240,11 +286,16 @@ export class GraphStore {
 
   // ---------- edge CRUD ----------
   addEdge(opts: { source: string; target: string; type?: string; weight?: number; confidence?: number; meta?: Record<string, unknown> }): EdgeRecord {
+    const source = String(opts.source).replace(/\s+/g, ' ').trim();
+    const target = String(opts.target).replace(/\s+/g, ' ').trim();
+    if (!source || !target) throw new Error('edge endpoints cannot be empty after normalization');
+    if (source === target) throw new Error('self-loop edges are not allowed');
+    const t = nowIso();
     this.db.prepare(
-      'INSERT INTO edges (source, target, type, weight, confidence, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) '
-      + 'ON CONFLICT (source, target, type) DO UPDATE SET weight = excluded.weight, confidence = excluded.confidence, meta = excluded.meta, deleted_at = NULL'
-    ).run(opts.source, opts.target, opts.type ?? 'related', opts.weight ?? 1.0, opts.confidence ?? 1.0, JSON.stringify(opts.meta ?? {}), nowIso());
-    return this.getEdge(opts.source, opts.target, opts.type ?? 'related')!;
+      'INSERT INTO edges (source, target, type, weight, confidence, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+      + 'ON CONFLICT (source, target, type) DO UPDATE SET weight = excluded.weight, confidence = excluded.confidence, meta = excluded.meta, deleted_at = NULL, updated_at = excluded.updated_at'
+    ).run(source, target, opts.type ?? 'related', opts.weight ?? 1.0, opts.confidence ?? 1.0, JSON.stringify(opts.meta ?? {}), t, t);
+    return this.getEdge(source, target, opts.type ?? 'related')!;
   }
 
   getEdge(source: string, target: string, type = 'related'): EdgeRecord | null {
@@ -261,6 +312,7 @@ export class GraphStore {
       confidence: row.confidence as number,
       meta: JSON.parse(row.meta as string) as Record<string, unknown>,
       created_at: row.created_at as string,
+      updated_at: (row.updated_at as string) ?? (row.created_at as string),
     };
   }
 
@@ -444,13 +496,14 @@ export class GraphStore {
     return rank;
   }
 
-  /** Related nodes by weight + confidence + shared neighbors. */
+  /** Related nodes by weight + confidence + degree signal (LightRAG rank=(edge_degree, weight)). */
   related(id: string, limit = 10): { node: NodeRecord; score: number }[] {
     const scores = new Map<string, number>();
     const bump = (nid: string, delta: number) => scores.set(nid, (scores.get(nid) ?? 0) + delta);
     for (const e of this.neighbors(id, 'both')) {
       const other = e.source === id ? e.target : e.source;
-      bump(other, e.weight * e.confidence);
+      const degree = this.neighbors(other, 'both').length;
+      bump(other, e.weight * e.confidence * (1 + Math.log1p(degree) / 4));
     }
     // second-degree: shared neighbors add a weaker signal
     for (const e of this.neighbors(id, 'both')) {
@@ -478,6 +531,110 @@ export class GraphStore {
       data: { id: e.source + '|' + e.target + '|' + e.type, source: e.source, target: e.target, label: e.type, weight: e.weight },
     }));
     return { nodes, edges };
+  }
+
+  // ---------- semantic layer (optional EmbeddingProvider) ----------
+  private provider: EmbeddingProvider | null = null;
+
+  /** Register an embedding provider. Null clears it. */
+  setEmbeddingProvider(provider: EmbeddingProvider | null): void { this.provider = provider; }
+
+  getEmbeddingProvider(): EmbeddingProvider | null { return this.provider; }
+
+  /** Vector similarity search (cosine over stored embeddings). Requires a provider. */
+  searchVector(query: string, opts: { topK?: number; type?: string } = {}): { node: NodeRecord; score: number }[] {
+    const provider = this.provider;
+    if (!provider) throw new Error('no embedding provider registered — call setEmbeddingProvider() first');
+    const [qv] = provider.embed([query]);
+    const topK = opts.topK ?? 10;
+    const rows = (opts.type ? this.db.prepare('SELECT * FROM nodes WHERE deleted_at IS NULL AND type = ?').all(opts.type) : this.db.prepare('SELECT * FROM nodes WHERE deleted_at IS NULL').all()) as Record<string, unknown>[];
+    const scored: { node: NodeRecord; score: number }[] = [];
+    for (const row of rows) {
+      const emb = decodeEmbedding(row.embedding as Uint8Array | null);
+      if (!emb || emb.length !== qv.length) continue;
+      let dot = 0, na = 0, nb = 0;
+      for (let i = 0; i < qv.length; i++) { dot += qv[i] * emb[i]; na += qv[i] * qv[i]; nb += emb[i] * emb[i]; }
+      const cos = dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+      scored.push({ node: this.rowToNode(row), score: cos });
+    }
+    return scored.sort((a, b) => b.score - a.score).slice(0, topK);
+  }
+
+  /** Batch-embed all nodes missing an embedding (deferred vector indexing). */
+  embedAll(batchSize = 64): number {
+    const provider = this.provider;
+    if (!provider) throw new Error('no embedding provider registered');
+    const missing = this.db.prepare('SELECT * FROM nodes WHERE deleted_at IS NULL AND embedding IS NULL').all() as Record<string, unknown>[];
+    let done = 0;
+    for (let i = 0; i < missing.length; i += batchSize) {
+      const batch = missing.slice(i, i + batchSize);
+      const texts = batch.map(r => String(r.title) + '\n' + String(r.content).slice(0, 2000));
+      const vecs = provider.embed(texts);
+      const stmt = this.db.prepare('UPDATE nodes SET embedding = ?, updated_at = ? WHERE id = ?');
+      for (let j = 0; j < batch.length; j++) stmt.run(encodeEmbedding(vecs[j]), nowIso(), batch[j].id as string);
+      done += batch.length;
+    }
+    return done;
+  }
+
+  // ---------- batch ops (LightRAG batch interface) ----------
+  upsertNodesBatch(nodes: { id?: string; type?: string; title: string; content?: string; embedding?: Float32Array | null; meta?: Record<string, unknown> }[]): number {
+    return this.withTx(() => {
+      let n = 0;
+      for (const node of nodes) { this.addNode(node); n++; }
+      return n;
+    });
+  }
+
+  upsertEdgesBatch(edges: { source: string; target: string; type?: string; weight?: number; confidence?: number; meta?: Record<string, unknown> }[]): number {
+    return this.withTx(() => {
+      let n = 0;
+      for (const e of edges) { this.addEdge(e); n++; }
+      return n;
+    });
+  }
+
+  // ---------- subgraph extraction (LightRAG get_knowledge_graph) ----------
+  subgraph(seed: string, maxDepth = 2, maxNodes = 50): { nodes: NodeRecord[]; edges: EdgeRecord[] } {
+    const visited = new Set<string>([seed]);
+    const queue: [string, number][] = [[seed, 0]];
+    const edgeKeys = new Set<string>();
+    const nodeList: NodeRecord[] = [];
+    const edgeList: EdgeRecord[] = [];
+    const seedNode = this.getNode(seed);
+    if (seedNode) nodeList.push(seedNode);
+    while (queue.length > 0 && nodeList.length < maxNodes) {
+      const [cur, depth] = queue.shift()!;
+      if (depth >= maxDepth) continue;
+      for (const e of this.neighbors(cur, 'both')) {
+        const other = e.source === cur ? e.target : e.source;
+        const key = [e.source, e.target, e.type].join('|');
+        if (!edgeKeys.has(key)) { edgeKeys.add(key); edgeList.push(e); }
+        if (!visited.has(other) && nodeList.length < maxNodes) {
+          visited.add(other);
+          const n = this.getNode(other);
+          if (n) nodeList.push(n);
+          queue.push([other, depth + 1]);
+        }
+      }
+    }
+    return { nodes: nodeList, edges: edgeList };
+  }
+
+  // ---------- labels (LightRAG search_labels / get_popular_labels) ----------
+  searchLabels(prefix: string, limit = 20): string[] {
+    const q = String(prefix).trim();
+    if (!q) return [];
+    const rows = this.db.prepare('SELECT DISTINCT title FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ORDER BY title LIMIT ?').all('%' + q + '%', limit) as { title: string }[];
+    return rows.map(r => r.title);
+  }
+
+  popularLabels(limit = 20): { title: string; degree: number }[] {
+    const rows = this.db.prepare(
+      'SELECT n.title, (SELECT COUNT(*) FROM edges e WHERE (e.source = n.id OR e.target = n.id) AND e.deleted_at IS NULL) AS degree '
+      + 'FROM nodes n WHERE n.deleted_at IS NULL ORDER BY degree DESC, n.updated_at DESC LIMIT ?'
+    ).all(limit) as { title: string; degree: number }[];
+    return rows;
   }
 
   stats(): { nodes: number; edges: number; snapshots: number } {

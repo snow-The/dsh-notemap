@@ -16,6 +16,19 @@ export interface EdgeRecord {
     confidence: number;
     meta: Record<string, unknown>;
     created_at: string;
+    updated_at: string;
+}
+/**
+ * Optional semantic layer (LightRAG deferred vector indexing / mem0 EmbeddingBase).
+ * Plug in any embedding provider; nothing else changes. When absent, keyword
+ * (FTS5) retrieval still works — vectors are an optional upgrade.
+ */
+export interface EmbeddingProvider {
+    readonly dim: number;
+    /** Embed a batch of texts into float32 vectors (same order). */
+    embed(texts: string[]): Float32Array[];
+    /** Optional model label for stats/debug. */
+    label?: string;
 }
 export interface SnapshotInfo {
     snapshot_id: number;
@@ -28,6 +41,8 @@ export interface PathStep {
     weight: number;
 }
 export declare function nowIso(): string;
+/** Normalization contract (LightRAG insert_custom_kg): trim + collapse whitespace + case fold. */
+export declare function normalizeName(s: string): string;
 /**
  * Networked knowledge graph backed by node:sqlite (WAL + withTx).
  * DuckLake-inspired: snapshot table + change stream for time travel & audit.
@@ -117,7 +132,7 @@ export declare class GraphStore {
     degreeCentrality(limit?: number): Record<string, number>;
     /** PageRank approximation (power iteration, undirected edge weights as transitions). */
     pageRank(iterations?: number, damping?: number): Record<string, number>;
-    /** Related nodes by weight + confidence + shared neighbors. */
+    /** Related nodes by weight + confidence + degree signal (LightRAG rank=(edge_degree, weight)). */
     related(id: string, limit?: number): {
         node: NodeRecord;
         score: number;
@@ -141,6 +156,45 @@ export declare class GraphStore {
             };
         }[];
     };
+    private provider;
+    /** Register an embedding provider. Null clears it. */
+    setEmbeddingProvider(provider: EmbeddingProvider | null): void;
+    getEmbeddingProvider(): EmbeddingProvider | null;
+    /** Vector similarity search (cosine over stored embeddings). Requires a provider. */
+    searchVector(query: string, opts?: {
+        topK?: number;
+        type?: string;
+    }): {
+        node: NodeRecord;
+        score: number;
+    }[];
+    /** Batch-embed all nodes missing an embedding (deferred vector indexing). */
+    embedAll(batchSize?: number): number;
+    upsertNodesBatch(nodes: {
+        id?: string;
+        type?: string;
+        title: string;
+        content?: string;
+        embedding?: Float32Array | null;
+        meta?: Record<string, unknown>;
+    }[]): number;
+    upsertEdgesBatch(edges: {
+        source: string;
+        target: string;
+        type?: string;
+        weight?: number;
+        confidence?: number;
+        meta?: Record<string, unknown>;
+    }[]): number;
+    subgraph(seed: string, maxDepth?: number, maxNodes?: number): {
+        nodes: NodeRecord[];
+        edges: EdgeRecord[];
+    };
+    searchLabels(prefix: string, limit?: number): string[];
+    popularLabels(limit?: number): {
+        title: string;
+        degree: number;
+    }[];
     stats(): {
         nodes: number;
         edges: number;

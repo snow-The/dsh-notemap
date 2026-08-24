@@ -17,7 +17,7 @@ import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
-  removeNote, clearAll,
+  removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf,
 } from './notemap.ts';
 
 export const name = 'dsh-notemap';
@@ -184,6 +184,73 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       required: ['title'],
     },
     execute: (args: { title: string; content?: string; type?: string; id?: string }) => addNote(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_context',
+    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning.',
+    parameters: {
+      type: 'object',
+      properties: {
+        seed: { type: 'string', description: 'Seed node id' },
+        maxDepth: { type: 'number', description: 'Max hop depth (default 2)' },
+        maxNodes: { type: 'number', description: 'Max nodes to collect (default 50)' },
+      },
+      required: ['seed'],
+    },
+    execute: (args: { seed: string; maxDepth?: number; maxNodes?: number }) => subgraphOf(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_labels',
+    description: 'Search note titles (prefix/fuzzy) or list popular labels by degree. Quick way to discover what the graph knows.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prefix: { type: 'string', description: 'Title prefix/fragment to match' },
+        popular: { type: 'boolean', description: 'If true, return top labels by connection degree instead' },
+        limit: { type: 'number', description: 'Max results (default 20)' },
+      },
+    },
+    execute: (args: { prefix?: string; popular?: boolean; limit?: number }) => labelsOf(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_vector',
+    description: 'Semantic vector search over stored embeddings (cosine). Requires an embedding provider registered via notemap_embed first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'Natural-language query' },
+        topK: { type: 'number', description: 'Max results (default 10)' },
+        type: { type: 'string', description: 'Restrict to a node type' },
+      },
+      required: ['q'],
+    },
+    execute: (args: { q: string; topK?: number; type?: string }) => searchVector(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_embed',
+    description: 'Register an embedding provider (dim) and backfill embeddings for all nodes missing them (deferred vector indexing). Pass dim and embedFn that maps texts to vectors.',
+    parameters: {
+      type: 'object',
+      properties: {
+        dim: { type: 'number', description: 'Embedding dimension' },
+        embedFn: { type: 'string', description: 'JSON string of a function (texts: string[]) => number[][] — evaluated in the plugin process' },
+        batchSize: { type: 'number', description: 'Embedding batch size (default 64)' },
+      },
+      required: ['dim', 'embedFn'],
+    },
+    execute: (args: { dim: number; embedFn: string; batchSize?: number }) => {
+      const fn = new Function('return ' + args.embedFn)() as (texts: string[]) => number[][];
+      setProvider({
+        dim: args.dim,
+        label: 'dynamic',
+        embed: (texts) => fn(texts).map(v => Float32Array.from(v)),
+      });
+      return { providerDim: args.dim, embedded: embedAll(args.batchSize) };
+    },
   }));
 
   reg(defineTool({
