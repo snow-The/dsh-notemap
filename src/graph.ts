@@ -125,6 +125,9 @@ export class GraphStore {
       "  content='nodes', content_rowid='rowid',",
       "  tokenize='trigram'",
       ");",
+      // backfill FTS index for pre-existing rows (migrate runs before any writes)
+      "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');",
+      "INSERT INTO nodes_fts(rowid, title, content) SELECT rowid, title, content FROM nodes;",
       "CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN",
       "  INSERT INTO nodes_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content);",
       "END;",
