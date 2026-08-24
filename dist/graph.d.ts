@@ -17,6 +17,9 @@ export interface EdgeRecord {
     meta: Record<string, unknown>;
     created_at: string;
     updated_at: string;
+    /** Bitemporal (light, Graphiti-inspired): when the fact became valid / was invalidated. */
+    valid_at: string;
+    invalid_at: string | null;
 }
 /**
  * Optional semantic layer (LightRAG deferred vector indexing / mem0 EmbeddingBase).
@@ -97,7 +100,10 @@ export declare class GraphStore {
         weight?: number;
         confidence?: number;
         meta?: Record<string, unknown>;
+        version?: boolean;
     }): EdgeRecord;
+    /** Full edge history for a pair (bitemporal timeline, newest first). */
+    edgeHistory(source: string, target: string, type?: string): EdgeRecord[];
     getEdge(source: string, target: string, type?: string): EdgeRecord | null;
     private rowToEdge;
     removeEdge(source: string, target: string, type?: string): boolean;
@@ -128,8 +134,10 @@ export declare class GraphStore {
     shortestPath(from: string, to: string): string[] | null;
     /** Common neighbors of two nodes (any direction). */
     commonNeighbors(a: string, b: string): string[];
-    /** Degree centrality: normalized node count of connections (in+out). */
+    /** Degree centrality from the degree cache (in+out, O(1) per node). */
     degreeCentrality(limit?: number): Record<string, number>;
+    /** Cached degree of a node (falls back to a live count when uncached). */
+    degreeOf(id: string): number;
     /** PageRank approximation (power iteration, undirected edge weights as transitions). */
     pageRank(iterations?: number, damping?: number): Record<string, number>;
     /** Related nodes by weight + confidence + degree signal (LightRAG rank=(edge_degree, weight)). */

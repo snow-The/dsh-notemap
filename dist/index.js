@@ -107,6 +107,36 @@ var GraphStore = class {
       this.db.exec("UPDATE edges SET updated_at = created_at WHERE updated_at IS NULL;");
     } catch {
     }
+    try {
+      this.db.exec("ALTER TABLE edges ADD COLUMN valid_at TEXT;");
+    } catch {
+    }
+    try {
+      this.db.exec("UPDATE edges SET valid_at = created_at WHERE valid_at IS NULL;");
+    } catch {
+    }
+    try {
+      this.db.exec("ALTER TABLE edges ADD COLUMN invalid_at TEXT;");
+    } catch {
+    }
+    this.db.exec(
+      "CREATE TABLE IF NOT EXISTS degree_cache (  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,  degree INTEGER NOT NULL DEFAULT 0);"
+    );
+    this.db.exec(
+      "CREATE TRIGGER IF NOT EXISTS edges_deg_ai AFTER INSERT ON edges WHEN NEW.deleted_at IS NULL AND NEW.invalid_at IS NULL BEGIN  INSERT INTO degree_cache(node_id, degree) VALUES (NEW.source, 1) ON CONFLICT(node_id) DO UPDATE SET degree = degree + 1;  INSERT INTO degree_cache(node_id, degree) VALUES (NEW.target, 1) ON CONFLICT(node_id) DO UPDATE SET degree = degree + 1;END;"
+    );
+    this.db.exec(
+      "CREATE TRIGGER IF NOT EXISTS edges_deg_ad AFTER UPDATE OF deleted_at, invalid_at ON edges WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) OR (OLD.invalid_at IS NULL AND NEW.invalid_at IS NOT NULL) BEGIN  UPDATE degree_cache SET degree = MAX(0, degree - 1) WHERE node_id IN (OLD.source, OLD.target);END;"
+    );
+    this.db.exec(
+      "CREATE TRIGGER IF NOT EXISTS edges_deg_au AFTER UPDATE OF deleted_at, invalid_at ON edges WHEN (OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL) OR (OLD.invalid_at IS NOT NULL AND NEW.invalid_at IS NULL) BEGIN  INSERT INTO degree_cache(node_id, degree) VALUES (NEW.source, 1) ON CONFLICT(node_id) DO UPDATE SET degree = degree + 1;  INSERT INTO degree_cache(node_id, degree) VALUES (NEW.target, 1) ON CONFLICT(node_id) DO UPDATE SET degree = degree + 1;END;"
+    );
+    const degCount = this.db.prepare("SELECT COUNT(*) AS c FROM degree_cache").get();
+    if (degCount.c === 0) {
+      this.db.exec(
+        "INSERT INTO degree_cache(node_id, degree) SELECT node_id, COUNT(*) FROM (SELECT source AS node_id FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL UNION ALL SELECT target AS node_id FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL) GROUP BY node_id"
+      );
+    }
   }
   close() {
     this.db.close();
@@ -165,7 +195,8 @@ var GraphStore = class {
   removeNode(id) {
     const r = this.db.prepare("UPDATE nodes SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(nowIso(), nowIso(), id);
     if (r.changes > 0) {
-      this.db.prepare("UPDATE edges SET deleted_at = ? WHERE (source = ? OR target = ?) AND deleted_at IS NULL").run(nowIso(), id, id);
+      const t = nowIso();
+      this.db.prepare("UPDATE edges SET deleted_at = ?, invalid_at = ? WHERE (source = ? OR target = ?) AND deleted_at IS NULL AND invalid_at IS NULL").run(t, t, id, id);
     }
     return r.changes > 0;
   }
@@ -173,7 +204,8 @@ var GraphStore = class {
   clearAll() {
     return this.withTx(() => {
       const n = Number(this.db.prepare("UPDATE nodes SET deleted_at = ?, updated_at = ? WHERE deleted_at IS NULL").run(nowIso(), nowIso()).changes);
-      const e = Number(this.db.prepare("UPDATE edges SET deleted_at = ? WHERE deleted_at IS NULL").run(nowIso()).changes);
+      const t = nowIso();
+      const e = Number(this.db.prepare("UPDATE edges SET deleted_at = ?, invalid_at = ? WHERE deleted_at IS NULL AND invalid_at IS NULL").run(t, t).changes);
       return { nodes: n, edges: e };
     });
   }
@@ -194,14 +226,14 @@ var GraphStore = class {
     try {
       const ftsQuery = query.replace(/"|'/g, " ").trim().slice(0, 64);
       rows = this.db.prepare(
-        "SELECT n.*, bm25(nodes_fts, 8.0, 2.0) AS bm25, (SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight))   FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json FROM nodes_fts JOIN nodes n ON n.rowid = nodes_fts.rowid WHERE nodes_fts MATCH ? AND n.deleted_at IS NULL ORDER BY bm25 LIMIT ?"
+        "SELECT n.*, bm25(nodes_fts, 8.0, 2.0) AS bm25, (SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight))   FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL AND e.invalid_at IS NULL LIMIT 6) AS neighbors_json FROM nodes_fts JOIN nodes n ON n.rowid = nodes_fts.rowid WHERE nodes_fts MATCH ? AND n.deleted_at IS NULL ORDER BY bm25 LIMIT ?"
       ).all('"' + ftsQuery + '"', limit);
     } catch {
     }
     if (rows.length === 0) {
       const like = "%" + query + "%";
       rows = this.db.prepare(
-        "SELECT n.*, 0 AS bm25, (SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight))   FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL LIMIT 6) AS neighbors_json FROM nodes n WHERE n.deleted_at IS NULL AND (n.title LIKE ? OR n.content LIKE ?) ORDER BY CASE WHEN n.title LIKE ? THEN 0 ELSE 1 END, n.updated_at DESC LIMIT ?"
+        "SELECT n.*, 0 AS bm25, (SELECT json_group_array(json_object('id', e.target, 'type', e.type, 'weight', e.weight))   FROM edges e WHERE e.source = n.id AND e.deleted_at IS NULL AND e.invalid_at IS NULL LIMIT 6) AS neighbors_json FROM nodes n WHERE n.deleted_at IS NULL AND (n.title LIKE ? OR n.content LIKE ?) ORDER BY CASE WHEN n.title LIKE ? THEN 0 ELSE 1 END, n.updated_at DESC LIMIT ?"
       ).all(like, like, like, limit);
     }
     const out = [];
@@ -227,12 +259,18 @@ var GraphStore = class {
     if (source === target) throw new Error("self-loop edges are not allowed");
     const t = nowIso();
     this.db.prepare(
-      "INSERT INTO edges (source, target, type, weight, confidence, meta, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (source, target, type) DO UPDATE SET weight = excluded.weight, confidence = excluded.confidence, meta = excluded.meta, deleted_at = NULL, updated_at = excluded.updated_at"
-    ).run(source, target, opts.type ?? "related", opts.weight ?? 1, opts.confidence ?? 1, JSON.stringify(opts.meta ?? {}), t, t);
+      "INSERT INTO edges (source, target, type, weight, confidence, meta, created_at, updated_at, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (source, target, type) DO UPDATE SET weight = excluded.weight, confidence = excluded.confidence, meta = excluded.meta, deleted_at = NULL, invalid_at = NULL, updated_at = excluded.updated_at"
+    ).run(source, target, opts.type ?? "related", opts.weight ?? 1, opts.confidence ?? 1, JSON.stringify(opts.meta ?? {}), t, t, t);
     return this.getEdge(source, target, opts.type ?? "related");
   }
+  /** Full edge history for a pair (bitemporal timeline, newest first). */
+  edgeHistory(source, target, type = "related") {
+    return this.db.prepare(
+      "SELECT * FROM edges WHERE source = ? AND target = ? AND type = ? ORDER BY valid_at DESC LIMIT 50"
+    ).all(source, target, type);
+  }
   getEdge(source, target, type = "related") {
-    const row = this.db.prepare("SELECT * FROM edges WHERE source = ? AND target = ? AND type = ? AND deleted_at IS NULL").get(source, target, type);
+    const row = this.db.prepare("SELECT * FROM edges WHERE source = ? AND target = ? AND type = ? AND deleted_at IS NULL AND invalid_at IS NULL").get(source, target, type);
     return row ? this.rowToEdge(row) : null;
   }
   rowToEdge(row) {
@@ -244,21 +282,26 @@ var GraphStore = class {
       confidence: row.confidence,
       meta: JSON.parse(row.meta),
       created_at: row.created_at,
-      updated_at: row.updated_at ?? row.created_at
+      updated_at: row.updated_at ?? row.created_at,
+      valid_at: row.valid_at ?? row.created_at,
+      invalid_at: row.invalid_at ?? null
     };
   }
   removeEdge(source, target, type = "related") {
-    const r = this.db.prepare("UPDATE edges SET deleted_at = ? WHERE source = ? AND target = ? AND type = ? AND deleted_at IS NULL").run(nowIso(), source, target, type);
+    const t = nowIso();
+    const r = this.db.prepare(
+      "UPDATE edges SET deleted_at = ?, invalid_at = ?, updated_at = ? WHERE source = ? AND target = ? AND type = ? AND deleted_at IS NULL AND invalid_at IS NULL AND invalid_at IS NULL"
+    ).run(t, t, t, source, target, type);
     return r.changes > 0;
   }
   neighbors(id, dir = "out") {
     if (dir === "out") {
-      return this.db.prepare("SELECT * FROM edges WHERE source = ? AND deleted_at IS NULL").all(id);
+      return this.db.prepare("SELECT * FROM edges WHERE source = ? AND deleted_at IS NULL AND invalid_at IS NULL").all(id);
     }
     if (dir === "in") {
-      return this.db.prepare("SELECT * FROM edges WHERE target = ? AND deleted_at IS NULL").all(id);
+      return this.db.prepare("SELECT * FROM edges WHERE target = ? AND deleted_at IS NULL AND invalid_at IS NULL").all(id);
     }
-    return this.db.prepare("SELECT * FROM edges WHERE (source = ? OR target = ?) AND deleted_at IS NULL").all(id, id);
+    return this.db.prepare("SELECT * FROM edges WHERE (source = ? OR target = ?) AND deleted_at IS NULL AND invalid_at IS NULL").all(id, id);
   }
   // ---------- snapshots (DuckLake-inspired) ----------
   /** Commit a snapshot capturing current graph state + change stream tail. */
@@ -271,7 +314,7 @@ var GraphStore = class {
       for (const n of nodes) {
         this.db.prepare("INSERT INTO changes (snapshot_id, table_name, op, key, data, created_at) VALUES (?, 'nodes', 'upsert', ?, ?, ?)").run(sid, n.id, JSON.stringify({ type: n.type, title: n.title, updated_at: n.updated_at }), t);
       }
-      const edges = this.db.prepare("SELECT * FROM edges WHERE deleted_at IS NULL").all();
+      const edges = this.db.prepare("SELECT * FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL").all();
       for (const e of edges) {
         this.db.prepare("INSERT INTO changes (snapshot_id, table_name, op, key, data, created_at) VALUES (?, 'edges', 'upsert', ?, ?, ?)").run(sid, e.source + "|" + e.target + "|" + e.type, JSON.stringify({ weight: e.weight, confidence: e.confidence }), t);
       }
@@ -378,18 +421,18 @@ var GraphStore = class {
     }
     return out;
   }
-  /** Degree centrality: normalized node count of connections (in+out). */
+  /** Degree centrality from the degree cache (in+out, O(1) per node). */
   degreeCentrality(limit = 20) {
-    const deg = {};
-    for (const e of this.db.prepare("SELECT source, target FROM edges WHERE deleted_at IS NULL").all()) {
-      const s = e.source;
-      const t = e.target;
-      deg[s] = (deg[s] ?? 0) + 1;
-      deg[t] = (deg[t] ?? 0) + 1;
-    }
-    return Object.fromEntries(
-      Object.entries(deg).sort((a, b) => b[1] - a[1]).slice(0, limit)
-    );
+    const rows = this.db.prepare(
+      "SELECT d.node_id, d.degree FROM degree_cache d JOIN nodes n ON n.id = d.node_id WHERE n.deleted_at IS NULL ORDER BY d.degree DESC LIMIT ?"
+    ).all(limit);
+    return Object.fromEntries(rows.map((r) => [r.node_id, r.degree]));
+  }
+  /** Cached degree of a node (falls back to a live count when uncached). */
+  degreeOf(id) {
+    const row = this.db.prepare("SELECT degree FROM degree_cache WHERE node_id = ?").get(id);
+    if (row) return row.degree;
+    return this.db.prepare("SELECT COUNT(*) AS c FROM edges WHERE (source = ? OR target = ?) AND deleted_at IS NULL AND invalid_at IS NULL").get(id, id);
   }
   /** PageRank approximation (power iteration, undirected edge weights as transitions). */
   pageRank(iterations = 20, damping = 0.85) {
@@ -419,7 +462,7 @@ var GraphStore = class {
     const bump = (nid, delta) => scores.set(nid, (scores.get(nid) ?? 0) + delta);
     for (const e of this.neighbors(id, "both")) {
       const other = e.source === id ? e.target : e.source;
-      const degree = this.neighbors(other, "both").length;
+      const degree = this.degreeOf(other);
       bump(other, e.weight * e.confidence * (1 + Math.log1p(degree) / 4));
     }
     for (const e of this.neighbors(id, "both")) {
@@ -438,7 +481,7 @@ var GraphStore = class {
     const nodes = this.listNodes(1e5).map((n) => ({
       data: { id: n.id, label: n.title, type: n.type }
     }));
-    const edges = this.db.prepare("SELECT * FROM edges WHERE deleted_at IS NULL").all().map((e) => ({
+    const edges = this.db.prepare("SELECT * FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL").all().map((e) => ({
       data: { id: e.source + "|" + e.target + "|" + e.type, source: e.source, target: e.target, label: e.type, weight: e.weight }
     }));
     return { nodes, edges };
@@ -549,13 +592,13 @@ var GraphStore = class {
   }
   popularLabels(limit = 20) {
     const rows = this.db.prepare(
-      "SELECT n.title, (SELECT COUNT(*) FROM edges e WHERE (e.source = n.id OR e.target = n.id) AND e.deleted_at IS NULL) AS degree FROM nodes n WHERE n.deleted_at IS NULL ORDER BY degree DESC, n.updated_at DESC LIMIT ?"
+      "SELECT n.title, COALESCE(d.degree, 0) AS degree FROM nodes n LEFT JOIN degree_cache d ON d.node_id = n.id WHERE n.deleted_at IS NULL ORDER BY degree DESC, n.updated_at DESC LIMIT ?"
     ).all(limit);
     return rows;
   }
   stats() {
     const n = this.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE deleted_at IS NULL").get();
-    const e = this.db.prepare("SELECT COUNT(*) AS c FROM edges WHERE deleted_at IS NULL").get();
+    const e = this.db.prepare("SELECT COUNT(*) AS c FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL").get();
     const s = this.db.prepare("SELECT COUNT(*) AS c FROM snapshots").get();
     return { nodes: n.c, edges: e.c, snapshots: s.c };
   }
