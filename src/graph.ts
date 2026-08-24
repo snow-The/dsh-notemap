@@ -764,21 +764,49 @@ export class GraphStore {
       return union === 0 ? 0 : inter / union;
     };
     const toks = all.map((n) => tok(n));
+    const sizes = toks.map((t) => t.size);
+    // 倒排索引:bigram -> 文档下标列表(只比较共享 >=1 bigram 的对,而非全 O(n^2))
+    const inverted = new Map<string, number[]>();
+    for (let i = 0; i < toks.length; i++) {
+      for (const b of toks[i]) {
+        let l = inverted.get(b);
+        if (!l) { l = []; inverted.set(b, l); }
+        l.push(i);
+      }
+    }
+    // 高频 bigram(文档频率 > dfCap)无区分度且候选对爆炸,跳过 —— 可能漏掉交集仅由高频 bigram 组成的对(近似)
+    const dfCap = Math.max(500, Math.floor(all.length * 0.2));
+    const N = all.length;
+    const pairInter = new Map<number, number>();
+    let candidates = 0;
+    for (const [, docs] of inverted) {
+      if (docs.length > dfCap) continue;
+      for (let x = 0; x < docs.length; x++) {
+        for (let y = x + 1; y < docs.length; y++) {
+          const k = docs[x] * N + docs[y];
+          pairInter.set(k, (pairInter.get(k) ?? 0) + 1);
+        }
+      }
+    }
     const edgesByNode: Map<string, { target: string; sim: number }[]> = new Map();
     let pairs = 0;
-    for (let i = 0; i < all.length; i++) {
-      for (let j = i + 1; j < all.length; j++) {
-        const sim = jaccard(toks[i], toks[j]);
-        if (sim < minSim) continue;
-        pairs++;
-        const push = (a: number, b: number) => {
-          const k = all[a].id;
-          const list = edgesByNode.get(k) ?? [];
-          list.push({ target: all[b].id, sim });
-          edgesByNode.set(k, list);
-        };
-        push(i, j); push(j, i);
-      }
+    for (const [k, inter] of pairInter) {
+      candidates++;
+      const i = Math.floor(k / N), j = k % N;
+      // 交集下界剪枝:sim >= minSim 要求 inter >= ceil(minSim * max(|a|,|b|))
+      const maxSize = sizes[i] > sizes[j] ? sizes[i] : sizes[j];
+      if (inter < Math.ceil(minSim * maxSize)) continue;
+      const union = sizes[i] + sizes[j] - inter;
+      const sim = inter / union;
+      if (sim < minSim) continue;
+      pairs++;
+      const push = (a: number, b: number) => {
+        const kk = all[a].id;
+        const list = edgesByNode.get(kk) ?? [];
+        list.push({ target: all[b].id, sim });
+        edgesByNode.set(kk, list);
+      };
+      push(i, j); push(j, i);
     }
     let edges = 0;
     for (const [source, list] of edgesByNode) {
