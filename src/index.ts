@@ -18,6 +18,7 @@ import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
   removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
+  searchFusedOf, filterNodesOf,
 } from './notemap.ts';
 
 export const name = 'dsh-notemap';
@@ -460,6 +461,36 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       required: [],
     },
     execute: (args: { limit?: number; force?: boolean }) => importSessions({ limit: args?.limit, force: args?.force }),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_fusion',
+    description: 'Multi-path retrieval with RRF fusion: FTS5 BM25 + LIKE + BFS graph expansion merged with Reciprocal Rank Fusion (k=60). Budget-capped for large graphs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default 20)' },
+        maxDepth: { type: 'number', description: 'BFS expansion depth (default 2)' },
+        budget: { type: 'number', description: 'Per-path candidate budget (default 60)' },
+      },
+      required: ['q'],
+    },
+    execute: (args: { q: string; limit?: number; maxDepth?: number; budget?: number }) => searchFusedOf(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_filter',
+    description: 'Filter nodes by a DSL over type + meta: {type: v, "meta.k": {eq|ne|gt|gte|lt|lte|in|exists}, AND/OR/NOT}. Meta matched via json_each.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filter: { type: 'object', description: 'Filter DSL object' },
+        limit: { type: 'number', description: 'Max results (default 50)' },
+      },
+      required: ['filter'],
+    },
+    execute: (args: { filter: Record<string, unknown>; limit?: number }) => filterNodesOf(args),
   }));
 
   reg(defineTool({

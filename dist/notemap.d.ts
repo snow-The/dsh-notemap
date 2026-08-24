@@ -101,3 +101,16 @@ export declare function labelsOf(args: {
     title: string;
     degree: number;
 }[];
+export declare function searchFusedOf(args: {
+    q: string;
+    limit?: number;
+    maxDepth?: number;
+    budget?: number;
+}): {
+    node: NodeRecord;
+    score: number;
+}[];
+export declare function filterNodesOf(args: {
+    filter: Record<string, unknown>;
+    limit?: number;
+}): NodeRecord[];

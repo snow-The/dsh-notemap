@@ -64,6 +64,56 @@ export function normalizeName(s: string): string {
   return String(s).replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/**
+ * Filter DSL -> SQL. Operators: eq, ne, gt, gte, lt, lte, in, exists.
+ * Keys: "type", "title", or "meta.<top-level-key>"; AND/OR/NOT nest.
+ * meta.* values are matched with json_each on the meta column.
+ */
+function buildFilterSql(filter: Record<string, unknown>): { where: string; args: (string | number | null | bigint | Uint8Array)[] } {
+  const args: (string | number | null | bigint | Uint8Array)[] = [];
+  const parts: string[] = [];
+  const cmp = (col: string, cond: unknown): string => {
+    if (cond !== null && typeof cond === 'object' && !Array.isArray(cond)) {
+      const o = cond as Record<string, unknown>;
+      if ('exists' in o) return o.exists ? col + ' IS NOT NULL' : col + ' IS NULL';
+      if ('in' in o) {
+        const list = (o as { in: unknown[] }).in;
+        for (const v of list) args.push(v as string | number | null);
+        return col + ' IN (' + list.map(() => '?').join(',') + ')';
+      }
+      const opMap: Record<string, string> = { eq: '=', ne: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+      for (const op of Object.keys(opMap)) {
+        if (op in o) { args.push(o[op] as string | number | null); return col + ' ' + opMap[op] + ' ?'; }
+      }
+      return '1=0';
+    }
+    args.push(cond as string | number | null);
+    return col + ' = ?';
+  };
+  for (const [key, cond] of Object.entries(filter)) {
+    if (key === 'AND' || key === 'OR') {
+      const subs = (Array.isArray(cond) ? cond : [cond]).map((c) => buildFilterSql(c as Record<string, unknown>));
+      parts.push('(' + subs.map((s) => s.where).join(key === 'AND' ? ' AND ' : ' OR ') + ')');
+      for (const s of subs) args.push(...s.args);
+      continue;
+    }
+    if (key === 'NOT') {
+      const sub = buildFilterSql(cond as Record<string, unknown>);
+      parts.push('NOT (' + sub.where + ')');
+      args.push(...sub.args);
+      continue;
+    }
+    if (key.startsWith('meta.')) {
+      const metaKey = key.slice(5);
+      args.push(metaKey);
+      parts.push('EXISTS (SELECT 1 FROM json_each(nodes.meta) je WHERE je.key = ? AND ' + cmp('je.value', cond) + ')');
+    } else if (key === 'type' || key === 'title') {
+      parts.push(cmp('nodes.' + key, cond));
+    }
+  }
+  return { where: parts.length ? parts.join(' AND ') : '1=1', args };
+}
+
 function encodeEmbedding(v: Float32Array | null): Uint8Array | null {
   if (!v) return null;
   return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
@@ -572,12 +622,17 @@ export class GraphStore {
       const degree = this.degreeOf(other);
       bump(other, e.weight * e.confidence * (1 + Math.log1p(degree) / 4));
     }
-    // second-degree: shared neighbors add a weaker signal
+    // second-degree: shared neighbors add a decaying signal (mem0 two-hop
+    // boost: 1/(1+0.001(n-1)^2), n = hops away)
     for (const e of this.neighbors(id, 'both')) {
       const other = e.source === id ? e.target : e.source;
       for (const e2 of this.neighbors(other, 'both')) {
         const o2 = e2.source === other ? e2.target : e2.source;
-        if (o2 !== id && !scores.has(o2)) bump(o2, e.weight * e2.weight * 0.3);
+        if (o2 !== id && !scores.has(o2)) {
+          const n = 2; // two hops
+          const decay = 1 / (1 + 0.001 * (n - 1) * (n - 1));
+          bump(o2, e.weight * e2.weight * 0.3 * decay);
+        }
       }
     }
     const out = [...scores.entries()]
@@ -586,6 +641,90 @@ export class GraphStore {
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
     return out;
+  }
+
+  // ---------- retrieval (P3: multi-path + RRF fusion) ----------
+  /**
+   * Multi-path retrieval with Reciprocal Rank Fusion (Graphiti-style):
+   * candidates from FTS5 BM25, LIKE fallback, and graph BFS expansion are
+   * merged with RRF (k=60). Budgets cap per-path candidates and BFS depth so
+   * large graphs stay responsive.
+   */
+  searchFused(q: string, opts: { limit?: number; maxDepth?: number; budget?: number; rrfK?: number } = {}): { node: NodeRecord; score: number }[] {
+    const query = String(q).trim();
+    const limit = opts.limit ?? 20;
+    const maxDepth = opts.maxDepth ?? 2;
+    const budget = opts.budget ?? 60;
+    const k = opts.rrfK ?? 60;
+    if (!query) return [];
+
+    const paths: string[][] = [];
+    // Path 1: FTS5 BM25
+    const fts: string[] = [];
+    try {
+      const ftsQuery = query.replace(/"|'/g, ' ').trim().slice(0, 64);
+      const rows = this.db.prepare(
+        'SELECT n.id FROM nodes_fts JOIN nodes n ON n.rowid = nodes_fts.rowid '
+        + "WHERE nodes_fts MATCH ? AND n.deleted_at IS NULL ORDER BY bm25(nodes_fts, 8.0, 2.0) LIMIT ?"
+      ).all('"' + ftsQuery + '"', budget) as { id: string }[];
+      for (const r of rows) fts.push(r.id);
+    } catch { /* FTS unavailable */ }
+    if (fts.length) paths.push(fts);
+
+    // Path 2: LIKE substring (title first, then content)
+    const like = '%' + query + '%';
+    const likeRows = this.db.prepare(
+      'SELECT id FROM nodes WHERE deleted_at IS NULL AND (title LIKE ? OR content LIKE ?) '
+      + 'ORDER BY CASE WHEN title LIKE ? THEN 0 ELSE 1 END, updated_at DESC LIMIT ?'
+    ).all(like, like, like, budget) as { id: string }[];
+    if (likeRows.length) paths.push(likeRows.map(r => r.id));
+
+    // Path 3: BFS expansion from FTS seeds (shared-neighbor recall, budgeted)
+    if (fts.length && maxDepth > 0) {
+      const bfsIds: string[] = [];
+      const visited = new Set<string>(fts);
+      const queue: [string, number][] = fts.map(id => [id, 0] as [string, number]);
+      while (queue.length > 0 && bfsIds.length < budget) {
+        const [cur, depth] = queue.shift()!;
+        if (depth >= maxDepth) continue;
+        for (const e of this.neighbors(cur, 'both')) {
+          const other = e.source === cur ? e.target : e.source;
+          if (!visited.has(other)) {
+            visited.add(other);
+            bfsIds.push(other);
+            queue.push([other, depth + 1]);
+          }
+        }
+      }
+      if (bfsIds.length) paths.push(bfsIds);
+    }
+
+    // RRF fusion: score = sum over paths of 1/(k + rank)
+    const scores = new Map<string, number>();
+    for (const p of paths) {
+      for (let i = 0; i < p.length; i++) {
+        scores.set(p[i], (scores.get(p[i]) ?? 0) + 1 / (k + i + 1));
+      }
+    }
+    return [...scores.entries()]
+      .map(([id, score]) => ({ node: this.getNode(id), score }))
+      .filter((x): x is { node: NodeRecord; score: number } => x.node !== null)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
+  // ---------- filter DSL (P3: eq/ne/gt/AND/OR/NOT via json_each) ----------
+  /**
+   * Filter nodes by a DSL over type + meta. Operators: eq, ne, gt, gte, lt,
+   * lte, in, exists, and logical AND/OR/NOT. Meta values are matched with
+   * json_each so nested keys like "meta.kind" work.
+   */
+  filterNodes(filter: Record<string, unknown>, limit = 50): NodeRecord[] {
+    const sql = buildFilterSql(filter);
+    const rows = this.db.prepare(
+      'SELECT * FROM nodes WHERE deleted_at IS NULL AND ' + sql.where + ' ORDER BY updated_at DESC LIMIT ?'
+    ).all(...sql.args, limit) as Record<string, unknown>[];
+    return rows.map(r => this.rowToNode(r));
   }
 
   // ---------- export ----------

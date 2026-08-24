@@ -104,3 +104,11 @@ export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: num
   if (args.popular) return getStore().popularLabels(args.limit ?? 20);
   return getStore().searchLabels(args.prefix ?? '', args.limit ?? 20);
 }
+
+export function searchFusedOf(args: { q: string; limit?: number; maxDepth?: number; budget?: number }): { node: NodeRecord; score: number }[] {
+  return getStore().searchFused(args.q, { limit: args.limit, maxDepth: args.maxDepth, budget: args.budget });
+}
+
+export function filterNodesOf(args: { filter: Record<string, unknown>; limit?: number }): NodeRecord[] {
+  return getStore().filterNodes(args.filter ?? {}, args.limit ?? 50);
+}

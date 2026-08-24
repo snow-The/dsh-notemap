@@ -145,6 +145,27 @@ export declare class GraphStore {
         node: NodeRecord;
         score: number;
     }[];
+    /**
+     * Multi-path retrieval with Reciprocal Rank Fusion (Graphiti-style):
+     * candidates from FTS5 BM25, LIKE fallback, and graph BFS expansion are
+     * merged with RRF (k=60). Budgets cap per-path candidates and BFS depth so
+     * large graphs stay responsive.
+     */
+    searchFused(q: string, opts?: {
+        limit?: number;
+        maxDepth?: number;
+        budget?: number;
+        rrfK?: number;
+    }): {
+        node: NodeRecord;
+        score: number;
+    }[];
+    /**
+     * Filter nodes by a DSL over type + meta. Operators: eq, ne, gt, gte, lt,
+     * lte, in, exists, and logical AND/OR/NOT. Meta values are matched with
+     * json_each so nested keys like "meta.kind" work.
+     */
+    filterNodes(filter: Record<string, unknown>, limit?: number): NodeRecord[];
     /** cytoscape.js-compatible elements JSON. */
     exportElements(): {
         nodes: {
