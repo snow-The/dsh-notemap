@@ -485,7 +485,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
     parameters: {
       type: 'object',
       properties: {
-        filter: { type: 'object', description: 'Filter DSL object' },
+        filter: { type: 'object', description: 'Filter DSL object', additionalProperties: true },
         limit: { type: 'number', description: 'Max results (default 50)' },
       },
       required: ['filter'],
