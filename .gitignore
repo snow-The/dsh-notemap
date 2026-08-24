@@ -2,3 +2,4 @@ node_modules/
 dist/
 test/smoke-bundle.mjs
 *.log
+snow-the-dsh-notemap-*.tgz
