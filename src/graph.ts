@@ -737,6 +737,60 @@ export class GraphStore {
 
   // ---------- export ----------
   /** cytoscape.js-compatible elements JSON. */
+  // ---------- P4: semantic auto-linking ----------
+  // Link nodes whose content is lexically similar (bigram Jaccard), so BFS
+  // expansion in searchFused can surface topically-related nodes that share
+  // no exact query term. O(n^2) on the given subset; keep subsets small.
+  autoLinkSemantic(ids?: string[], opts: { minSim?: number; maxPerNode?: number; type?: string } = {}): { edges: number; pairs: number } {
+    const minSim = opts.minSim ?? 0.22;
+    const maxPerNode = opts.maxPerNode ?? 4;
+    const type = opts.type ?? 'semantic';
+    const all = ids ? ids.map((id) => this.getNode(id)).filter((n): n is NodeRecord => !!n) : this.listNodes(100000);
+    if (all.length < 2) return { edges: 0, pairs: 0 };
+    const tok = (n: NodeRecord): Set<string> => {
+      const s = (n.title + ' ' + n.content).toLowerCase();
+      const t = new Set<string>();
+      for (let i = 0; i < s.length - 1; i++) {
+        const c = s.charCodeAt(i);
+        // keep CJK + latin runs only (skip whitespace/punct bigrams)
+        if (c > 127 || /[a-z0-9]/.test(s[i])) t.add(s.slice(i, i + 2));
+      }
+      return t;
+    };
+    const jaccard = (a: Set<string>, b: Set<string>): number => {
+      let inter = 0;
+      for (const x of a) if (b.has(x)) inter++;
+      const union = a.size + b.size - inter;
+      return union === 0 ? 0 : inter / union;
+    };
+    const toks = all.map((n) => tok(n));
+    const edgesByNode: Map<string, { target: string; sim: number }[]> = new Map();
+    let pairs = 0;
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const sim = jaccard(toks[i], toks[j]);
+        if (sim < minSim) continue;
+        pairs++;
+        const push = (a: number, b: number) => {
+          const k = all[a].id;
+          const list = edgesByNode.get(k) ?? [];
+          list.push({ target: all[b].id, sim });
+          edgesByNode.set(k, list);
+        };
+        push(i, j); push(j, i);
+      }
+    }
+    let edges = 0;
+    for (const [source, list] of edgesByNode) {
+      list.sort((a, b) => b.sim - a.sim);
+      for (const e of list.slice(0, maxPerNode)) {
+        this.addEdge({ source, target: e.target, type, weight: Math.round(e.sim * 100) / 100, confidence: 0.75 });
+        edges++;
+      }
+    }
+    return { edges, pairs };
+  }
+
   exportElements(): { nodes: { data: { id: string; label: string; type: string } }[]; edges: { data: { id: string; source: string; target: string; label: string; weight: number } }[] } {
     const nodes = this.listNodes(100000).map(n => ({
       data: { id: n.id, label: n.title, type: n.type },

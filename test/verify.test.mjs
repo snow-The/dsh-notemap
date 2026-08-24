@@ -97,7 +97,8 @@ test('P2: importSessions zstd 全链路 + 幂等 + force 重导', async () => {
 
     const r1 = await importSessions({ sessionsDir: dir, limit: 10 });
     assert.equal(r1.sessions, 1, 'one session file');
-    assert.equal(r1.events, 1, 'user/message imported (assistant skipped by design)');
+    assert.equal(r1.events, 1, 'user/message imported');
+    assert.equal(r1.assistants, 1, 'assistant/message imported');
     assert.equal(r1.checkpoints, 1, 'one checkpoint imported');
     assert.ok(r1.imported.length === 1);
 
@@ -106,14 +107,57 @@ test('P2: importSessions zstd 全链路 + 幂等 + force 重导', async () => {
     assert.equal(r2.skipped, 1, 'file-level anchor skips unchanged file');
 
     const r3 = await importSessions({ sessionsDir: dir, limit: 10, force: true });
-    assert.ok(r3.events >= 1 && r3.checkpoints >= 1, 'force re-imports everything');
+    assert.ok(r3.events >= 1 && r3.checkpoints >= 1 && r3.assistants >= 1, 'force re-imports everything');
 
     const st = getStore().stats();
-    assert.ok(st.nodes >= 3, 'session + 1 event + 1 checkpoint nodes exist, got ' + st.nodes);
+    assert.ok(st.nodes >= 4, 'session + 1 event + 1 assistant + 1 checkpoint nodes exist, got ' + st.nodes);
   } finally {
     cs();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test('P4: autoLinkSemantic 同主题建边、跨主题无边、maxPerNode 限制', () => {
+  const { s, dir } = newStore();
+  try {
+    // 同主题组(标题共享 bigram)
+    s.addNode({ id: 'm1', title: '机器学习笔记', content: '神经网络 训练 优化 损失函数 反向传播' });
+    s.addNode({ id: 'm2', title: '机器学习入门', content: '神经网络 训练 数据 特征 评估' });
+    s.addNode({ id: 'm3', title: '机器学习实践', content: '神经网络 训练 调参 实验 结果' });
+    // 无关节点
+    s.addNode({ id: 'c1', title: '买菜清单', content: '土豆 鸡蛋 牛奶 超市 冰箱' });
+    s.addNode({ id: 'c2', title: '装修预算', content: '瓷砖 油漆 工人 报价 工期' });
+
+    const r = s.autoLinkSemantic(undefined, { minSim: 0.2, maxPerNode: 2 });
+    assert.ok(r.edges > 0, 'created ' + r.edges + ' semantic edges');
+    // 同主题节点间应有边
+    const m1Nei = s.neighbors('m1').map(e => e.target);
+    assert.ok(m1Nei.includes('m2') || m1Nei.includes('m3'), 'm1 linked to same-theme nodes');
+    // 跨主题不应有边
+    assert.ok(!m1Nei.includes('c1') && !m1Nei.includes('c2'), 'no cross-theme edges');
+    // 每节点边数 ≤ maxPerNode(2)
+    for (const id of ['m1', 'm2', 'm3', 'c1', 'c2']) {
+      assert.ok(s.neighbors(id).length <= 2, id + ' degree ' + s.neighbors(id).length + ' <= 2');
+    }
+  } finally { closeStore(s, dir); }
+});
+
+test('P4: 语义边让 searchFused 召回无词面命中的同簇节点', () => {
+  const { s, dir } = newStore();
+  try {
+    s.addNode({ id: 'a', title: '机器学习', content: '神经网络 训练 数据' });
+    s.addNode({ id: 'b', title: '学习笔记', content: '神经网络 训练 记录 总结' });
+    s.addNode({ id: 'c', title: '随便记记', content: '购物 清单 天气' });
+    // b 与 a 共享 '学习' bigram → 自动建边
+    const r = s.autoLinkSemantic(undefined, { minSim: 0.15 });
+    assert.ok(r.edges > 0);
+    const res = s.searchFused('机器学习', { limit: 5 });
+    const ids = res.map(x => x.node.id);
+    assert.ok(ids.includes('a'), '直命中 a');
+    assert.ok(ids.includes('b') || s.neighbors('a').some(e => e.target === 'b'), 'b 通过语义边进入融合候选');
+    assert.ok(!ids.includes('c'), '无关节点不进');
+  } finally { closeStore(s, dir); }
 });
 
 // ---------- P3:RRF 融合检索 ----------

@@ -60,7 +60,7 @@ function cleanText(s: string): string {
 const IMPORT_VERSION = 2;
 
 export async function importSessions(opts?: { limit?: number; maxLines?: number; force?: boolean; sessionsDir?: string }): Promise<{
-  scanned: number; sessions: number; checkpoints: number; events: number; skipped: number; imported: string[];
+  scanned: number; sessions: number; checkpoints: number; events: number; assistants: number; skipped: number; imported: string[];
 }> {
   const { execFileSync } = await import('node:child_process');
   const { readdirSync, statSync, readFileSync } = await import('node:fs');
@@ -89,7 +89,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
   const maxLines = opts?.maxLines ?? 2000;
   const force = opts?.force ?? false;
   const imported: string[] = [];
-  let sessions = 0, checkpoints = 0, events = 0, skipped = 0;
+  let sessions = 0, checkpoints = 0, events = 0, assistants = 0, skipped = 0;
 
   for (const f of files.slice(0, limit)) {
     let text = '';
@@ -113,6 +113,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
     const prevMeta = (existing?.meta ?? {}) as Record<string, unknown>;
     const prevHash = String(prevMeta.import_hash ?? '');
     const prevEvents = Number(prevMeta.imported_events ?? 0);
+    const prevAsst = Number(prevMeta.imported_asst ?? 0);
     const prevVersion = Number(prevMeta.import_version ?? 0);
     if (!force && prevHash === fileHash && prevEvents > 0 && prevVersion === IMPORT_VERSION) {
       skipped++;
@@ -134,7 +135,8 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
     const episode = { file: base, importVersion: IMPORT_VERSION };
     const chkNodes: string[] = [];
     const evtNodes: string[] = [];
-    let chkIdx = 0, evtIdx = 0, lineIdx = 0;
+    const asstNodes: string[] = [];
+    let chkIdx = 0, evtIdx = 0, asstIdx = 0, lineIdx = 0;
     for (const line of lines) {
       lineIdx++;
       let ev: any;
@@ -170,6 +172,15 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
         checkpoints++;
       } else if (c.includes('system-reminder') || c.startsWith('<') && c.includes('>')) {
         continue;
+      } else if (evType === 'assistant/message') {
+        const clean = cleanText(c);
+        if (clean.length < 8) continue;
+        const aidx = asstIdx++;
+        if (aidx < prevAsst && !force) continue; // event-level watermark
+        const id = 'asst:' + fileKey + ':' + aidx;
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: 'assistant-event', meta: { file: base, episode: { ...episode, index: aidx, line: lineIdx } } });
+        asstNodes.push(id);
+        assistants++;
       } else if (evType === 'user/message' || evType === '') {
         const clean = cleanText(c);
         if (clean.length < 8) continue;
@@ -187,11 +198,12 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
     const totalImported = chkIdx + evtIdx;
     await addNote({
       id: sessId, title, type: 'session',
-      content: (chkIdx + ' checkpoint(s), ' + evtIdx + ' event(s) from ' + base),
-      meta: { file: base, import_hash: fileHash, imported_events: totalImported, import_version: IMPORT_VERSION, episode },
+      content: (chkIdx + ' checkpoint(s), ' + evtIdx + ' event(s), ' + asstIdx + ' assistant(s) from ' + base),
+      meta: { file: base, import_hash: fileHash, imported_events: totalImported, imported_asst: asstIdx, import_version: IMPORT_VERSION, episode },
     });
     for (const id of chkNodes) await linkNotes({ source: sessId, target: id, type: 'checkpoint', weight: 1, confidence: 1 });
     for (const id of evtNodes) await linkNotes({ source: sessId, target: id, type: 'follows', weight: 0.8, confidence: 1 });
+    for (const id of asstNodes) await linkNotes({ source: sessId, target: id, type: 'follows', weight: 0.7, confidence: 1 });
     // chain: last checkpoint -> first event (what the compressed knowledge produced)
     if (chkNodes.length && evtNodes.length) {
       await linkNotes({ source: chkNodes[chkNodes.length - 1], target: evtNodes[0], type: 'produces', weight: 0.6, confidence: 0.7 });
@@ -199,7 +211,7 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
     sessions++;
     imported.push(sessId);
   }
-  return { scanned: files.length, sessions, checkpoints, events, skipped, imported };
+  return { scanned: files.length, sessions, checkpoints, events, assistants, skipped, imported };
 }
 
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
@@ -492,6 +504,22 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       required: ['filter'],
     },
     execute: (args: { filter: Record<string, unknown>; limit?: number }) => filterNodesOf(args),
+  }));
+
+
+  reg(defineTool({
+    name: 'notemap_autolink',
+    description: 'Auto-link nodes by lexical similarity (bigram Jaccard) so BFS retrieval can surface topically-related nodes without shared query terms. Pass ids to scope a subset.',
+    parameters: {
+      type: 'object',
+      properties: {
+        ids: { type: 'array', items: { type: 'string' }, description: 'Optional subset of node ids to link' },
+        minSim: { type: 'number', description: 'Min Jaccard similarity (default 0.22)' },
+        maxPerNode: { type: 'number', description: 'Max semantic edges per node (default 4)' },
+      },
+      required: [],
+    },
+    execute: (args: { ids?: string[]; minSim?: number; maxPerNode?: number }) => getStore().autoLinkSemantic(args?.ids, { minSim: args?.minSim, maxPerNode: args?.maxPerNode }),
   }));
 
   reg(defineTool({

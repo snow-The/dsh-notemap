@@ -167,6 +167,14 @@ export declare class GraphStore {
      */
     filterNodes(filter: Record<string, unknown>, limit?: number): NodeRecord[];
     /** cytoscape.js-compatible elements JSON. */
+    autoLinkSemantic(ids?: string[], opts?: {
+        minSim?: number;
+        maxPerNode?: number;
+        type?: string;
+    }): {
+        edges: number;
+        pairs: number;
+    };
     exportElements(): {
         nodes: {
             data: {

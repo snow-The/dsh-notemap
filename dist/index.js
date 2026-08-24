@@ -51,8 +51,14 @@ function buildFilterSql(filter) {
     }
     if (key.startsWith("meta.")) {
       const metaKey = key.slice(5);
-      args.push(metaKey);
-      parts.push("EXISTS (SELECT 1 FROM json_each(nodes.meta) je WHERE je.key = ? AND " + cmp("je.value", cond) + ")");
+      const isObj = cond !== null && typeof cond === "object" && !Array.isArray(cond);
+      if (isObj && "exists" in cond) {
+        parts.push((cond.exists ? "EXISTS" : "NOT EXISTS") + " (SELECT 1 FROM json_each(nodes.meta, ?))");
+        args.push("$." + metaKey);
+      } else {
+        args.push("$." + metaKey);
+        parts.push("EXISTS (SELECT 1 FROM json_each(nodes.meta, ?) je WHERE " + cmp("je.value", cond) + ")");
+      }
     } else if (key === "type" || key === "title") {
       parts.push(cmp("nodes." + key, cond));
     }
@@ -597,6 +603,59 @@ var GraphStore = class {
   }
   // ---------- export ----------
   /** cytoscape.js-compatible elements JSON. */
+  // ---------- P4: semantic auto-linking ----------
+  // Link nodes whose content is lexically similar (bigram Jaccard), so BFS
+  // expansion in searchFused can surface topically-related nodes that share
+  // no exact query term. O(n^2) on the given subset; keep subsets small.
+  autoLinkSemantic(ids, opts = {}) {
+    const minSim = opts.minSim ?? 0.22;
+    const maxPerNode = opts.maxPerNode ?? 4;
+    const type = opts.type ?? "semantic";
+    const all = ids ? ids.map((id) => this.getNode(id)).filter((n) => !!n) : this.listNodes(1e5);
+    if (all.length < 2) return { edges: 0, pairs: 0 };
+    const tok = (n) => {
+      const s = (n.title + " " + n.content).toLowerCase();
+      const t = /* @__PURE__ */ new Set();
+      for (let i = 0; i < s.length - 1; i++) {
+        const c = s.charCodeAt(i);
+        if (c > 127 || /[a-z0-9]/.test(s[i])) t.add(s.slice(i, i + 2));
+      }
+      return t;
+    };
+    const jaccard = (a, b) => {
+      let inter = 0;
+      for (const x of a) if (b.has(x)) inter++;
+      const union = a.size + b.size - inter;
+      return union === 0 ? 0 : inter / union;
+    };
+    const toks = all.map((n) => tok(n));
+    const edgesByNode = /* @__PURE__ */ new Map();
+    let pairs = 0;
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const sim = jaccard(toks[i], toks[j]);
+        if (sim < minSim) continue;
+        pairs++;
+        const push = (a, b) => {
+          const k = all[a].id;
+          const list = edgesByNode.get(k) ?? [];
+          list.push({ target: all[b].id, sim });
+          edgesByNode.set(k, list);
+        };
+        push(i, j);
+        push(j, i);
+      }
+    }
+    let edges = 0;
+    for (const [source, list] of edgesByNode) {
+      list.sort((a, b) => b.sim - a.sim);
+      for (const e of list.slice(0, maxPerNode)) {
+        this.addEdge({ source, target: e.target, type, weight: Math.round(e.sim * 100) / 100, confidence: 0.75 });
+        edges++;
+      }
+    }
+    return { edges, pairs };
+  }
   exportElements() {
     const nodes = this.listNodes(1e5).map((n) => ({
       data: { id: n.id, label: n.title, type: n.type }
@@ -990,12 +1049,13 @@ function cleanText(s) {
 var IMPORT_VERSION = 2;
 async function importSessions(opts) {
   const { execFileSync } = await import("node:child_process");
-  const { readdirSync, statSync } = await import("node:fs");
+  const { readdirSync, statSync, readFileSync } = await import("node:fs");
+  const { zstdDecompressSync } = await import("node:zlib");
   const { join: join2 } = await import("node:path");
   const { homedir } = await import("node:os");
   const { createHash } = await import("node:crypto");
   const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
-  const root = join2(homedir(), ".dsh", "sessions");
+  const root = opts?.sessionsDir ?? join2(homedir(), ".dsh", "sessions");
   const files = [];
   const walk = (dir) => {
     let entries = [];
@@ -1018,13 +1078,17 @@ async function importSessions(opts) {
   const maxLines = opts?.maxLines ?? 2e3;
   const force = opts?.force ?? false;
   const imported = [];
-  let sessions = 0, checkpoints = 0, events = 0, skipped = 0;
+  let sessions = 0, checkpoints = 0, events = 0, assistants = 0, skipped = 0;
   for (const f of files.slice(0, limit)) {
     let text = "";
     try {
       text = execFileSync("zstd", ["-d", "-c", f], { timeout: 2e4, encoding: "utf8", windowsHide: true });
     } catch {
-      text = "";
+      try {
+        text = zstdDecompressSync(readFileSync(f)).toString("utf8");
+      } catch {
+        text = "";
+      }
     }
     const lines = text.split("\n").filter(Boolean).slice(0, maxLines);
     const base = f.split(/[\\/]/).pop() ?? f;
@@ -1035,6 +1099,7 @@ async function importSessions(opts) {
     const prevMeta = existing?.meta ?? {};
     const prevHash = String(prevMeta.import_hash ?? "");
     const prevEvents = Number(prevMeta.imported_events ?? 0);
+    const prevAsst = Number(prevMeta.imported_asst ?? 0);
     const prevVersion = Number(prevMeta.import_version ?? 0);
     if (!force && prevHash === fileHash && prevEvents > 0 && prevVersion === IMPORT_VERSION) {
       skipped++;
@@ -1055,7 +1120,8 @@ async function importSessions(opts) {
     const episode = { file: base, importVersion: IMPORT_VERSION };
     const chkNodes = [];
     const evtNodes = [];
-    let chkIdx = 0, evtIdx = 0, lineIdx = 0;
+    const asstNodes = [];
+    let chkIdx = 0, evtIdx = 0, asstIdx = 0, lineIdx = 0;
     for (const line of lines) {
       lineIdx++;
       let ev;
@@ -1084,7 +1150,7 @@ async function importSessions(opts) {
         const summary = extractSummary(c);
         if (summary.length < 20) continue;
         const idx = chkIdx++;
-        if (idx < prevEvents) continue;
+        if (idx < prevEvents && !force) continue;
         const id = "chk:" + fileKey + ":" + idx;
         const topic = extractTopic(summary);
         await addNote({ id, title: topic || "checkpoint " + (idx + 1), content: summary.slice(0, 800), type: "checkpoint", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
@@ -1092,11 +1158,20 @@ async function importSessions(opts) {
         checkpoints++;
       } else if (c.includes("system-reminder") || c.startsWith("<") && c.includes(">")) {
         continue;
+      } else if (evType === "assistant/message") {
+        const clean = cleanText(c);
+        if (clean.length < 8) continue;
+        const aidx = asstIdx++;
+        if (aidx < prevAsst && !force) continue;
+        const id = "asst:" + fileKey + ":" + aidx;
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "assistant-event", meta: { file: base, episode: { ...episode, index: aidx, line: lineIdx } } });
+        asstNodes.push(id);
+        assistants++;
       } else if (evType === "user/message" || evType === "") {
         const clean = cleanText(c);
         if (clean.length < 8) continue;
         const idx = evtIdx++;
-        if (idx < prevEvents) continue;
+        if (idx < prevEvents && !force) continue;
         const id = "evt:" + fileKey + ":" + idx;
         await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "session-event", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         evtNodes.push(id);
@@ -1109,18 +1184,19 @@ async function importSessions(opts) {
       id: sessId,
       title,
       type: "session",
-      content: chkIdx + " checkpoint(s), " + evtIdx + " event(s) from " + base,
-      meta: { file: base, import_hash: fileHash, imported_events: totalImported, import_version: IMPORT_VERSION, episode }
+      content: chkIdx + " checkpoint(s), " + evtIdx + " event(s), " + asstIdx + " assistant(s) from " + base,
+      meta: { file: base, import_hash: fileHash, imported_events: totalImported, imported_asst: asstIdx, import_version: IMPORT_VERSION, episode }
     });
     for (const id of chkNodes) await linkNotes({ source: sessId, target: id, type: "checkpoint", weight: 1, confidence: 1 });
     for (const id of evtNodes) await linkNotes({ source: sessId, target: id, type: "follows", weight: 0.8, confidence: 1 });
+    for (const id of asstNodes) await linkNotes({ source: sessId, target: id, type: "follows", weight: 0.7, confidence: 1 });
     if (chkNodes.length && evtNodes.length) {
       await linkNotes({ source: chkNodes[chkNodes.length - 1], target: evtNodes[0], type: "produces", weight: 0.6, confidence: 0.7 });
     }
     sessions++;
     imported.push(sessId);
   }
-  return { scanned: files.length, sessions, checkpoints, events, skipped, imported };
+  return { scanned: files.length, sessions, checkpoints, events, assistants, skipped, imported };
 }
 function apply(ctx) {
   const reg = ctx.tools?.register?.bind(ctx.tools);
@@ -1390,6 +1466,20 @@ function apply(ctx) {
       required: ["filter"]
     },
     execute: (args) => filterNodesOf(args)
+  }));
+  reg(defineTool({
+    name: "notemap_autolink",
+    description: "Auto-link nodes by lexical similarity (bigram Jaccard) so BFS retrieval can surface topically-related nodes without shared query terms. Pass ids to scope a subset.",
+    parameters: {
+      type: "object",
+      properties: {
+        ids: { type: "array", items: { type: "string" }, description: "Optional subset of node ids to link" },
+        minSim: { type: "number", description: "Min Jaccard similarity (default 0.22)" },
+        maxPerNode: { type: "number", description: "Max semantic edges per node (default 4)" }
+      },
+      required: []
+    },
+    execute: (args) => getStore().autoLinkSemantic(args?.ids, { minSim: args?.minSim, maxPerNode: args?.maxPerNode })
   }));
   reg(defineTool({
     name: "notemap_remove",

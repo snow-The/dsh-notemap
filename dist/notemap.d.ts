@@ -1,4 +1,5 @@
-import { GraphStore, NodeRecord, EdgeRecord } from './graph.ts';
+import { GraphStore } from './graph.ts';
+import type { NodeRecord, EdgeRecord } from './graph.ts';
 export declare function getStore(dbPath?: string): GraphStore;
 export declare function closeStore(): void;
 export declare function addNote(args: {
