@@ -117,8 +117,8 @@ export class GraphStore {
       ");",
       "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);",
       "",
-      "ALTER TABLE edges ADD COLUMN updated_at TEXT;",
-      "UPDATE edges SET updated_at = created_at WHERE updated_at IS NULL;",
+      "",
+      "",
       "",
       "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(",
       "  title, content,",
@@ -157,6 +157,9 @@ export class GraphStore {
       "CREATE INDEX IF NOT EXISTS idx_changes_snapshot ON changes(snapshot_id);",
     ].join('\n');
     this.db.exec(schema);
+    // idempotent schema-v2 migrations (safe on every boot)
+    try { this.db.exec("ALTER TABLE edges ADD COLUMN updated_at TEXT;"); } catch { /* already present */ }
+    try { this.db.exec("UPDATE edges SET updated_at = created_at WHERE updated_at IS NULL;"); } catch { /* no-op */ }
   }
 
   close(): void { this.db.close(); }
