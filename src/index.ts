@@ -11,7 +11,7 @@ const defineTool = (o: any) => {
       parameters[k] = { ...(v as any), ...(required.has(k) ? { required: true } : {}) };
     }
   }
-  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: {}, render: () => [] } });
+  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: 'json' }, render: () => [] } });
 };
 import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
