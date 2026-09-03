@@ -20,6 +20,7 @@ import {
   removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
   searchFusedOf, filterNodesOf,
 } from './notemap.ts';
+import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts';
 
 export const name = 'dsh-notemap';
 
@@ -452,14 +453,22 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       },
       required: ['query'],
     },
-    execute: (args: { query: string; limit?: number }) =>
-      searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h: any) => ({
+    execute: (args: { query: string; limit?: number }) => {
+      const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h: any) => ({
         id: h.node?.id,
         title: h.node?.title,
         type: h.node?.type,
         snippet: h.snippet,
         linked: (h.neighbors ?? []).map((nb: any) => nb.id + ' (' + nb.type + ' w' + nb.weight + ')').join(', '),
-      })),
+      }));
+      // 兼容依赖：ACP 图可用时混入跨会话 checkpoint 命中
+      const acp = acpGraphRecall(args.query, 3);
+      const acpHits = acp.map((h) => ({
+        id: h.node, title: h.node, type: 'acp-checkpoint',
+        snippet: h.summary.slice(0, 120), linked: '[acp_graph 跨会话]',
+      }));
+      return [...acpHits, ...local].slice(0, args.limit ?? 10);
+    },
   }));
 
   reg(defineTool({
@@ -473,7 +482,15 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
       },
       required: [],
     },
-    execute: (args: { limit?: number; force?: boolean }) => importSessions({ limit: args?.limit, force: args?.force }),
+    execute: (args: { limit?: number; force?: boolean }) => {
+      // 兼容依赖：ACP 图可用时从 ACP 图导入（避免重复解析 session），否则回退本地解析
+      if (acpGraphAvailable()) {
+        const store = getStore();
+        const st = importFromAcpGraph(store, args?.force ?? false);
+        return { source: 'acp_graph', entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+      }
+      return importSessions({ limit: args?.limit, force: args?.force });
+    },
   }));
 
   reg(defineTool({
