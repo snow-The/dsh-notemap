@@ -21,7 +21,7 @@ import type { GraphStore } from './graph.ts';
  * can never be parsed as column filters or operators. Falls back to a harmless empty phrase. */
 function ftsPhrase(q: unknown): string {
   const toks = String(q ?? '').toLowerCase().replace(/["'^*:()\[\]{}]/g, ' ').split(/\s+/).filter((t) => t.length > 1).slice(0, 8);
-  return toks.length ? toks.map((t) => '"' + t + '"').join(' OR ') : '""';
+  return toks.length ? toks.map((t) => '"' + t + '"*').join(' OR ') : '""';
 }
 
 function dshHome(): string {

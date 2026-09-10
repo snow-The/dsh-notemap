@@ -902,7 +902,7 @@ import { join as join2 } from "node:path";
 import { homedir } from "node:os";
 function ftsPhrase(q) {
   const toks = String(q ?? "").toLowerCase().replace(/["'^*:()\[\]{}]/g, " ").split(/\s+/).filter((t) => t.length > 1).slice(0, 8);
-  return toks.length ? toks.map((t) => '"' + t + '"').join(" OR ") : '""';
+  return toks.length ? toks.map((t) => '"' + t + '"*').join(" OR ") : '""';
 }
 function dshHome() {
   return process.env.DSH_HOME ?? join2(homedir(), ".dsh");
