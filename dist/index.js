@@ -900,6 +900,10 @@ import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { join as join2 } from "node:path";
 import { homedir } from "node:os";
+function ftsPhrase(q) {
+  const toks = String(q ?? "").toLowerCase().replace(/["'^*:()\[\]{}]/g, " ").split(/\s+/).filter((t) => t.length > 1).slice(0, 8);
+  return toks.length ? toks.map((t) => '"' + t + '"').join(" OR ") : '""';
+}
 function dshHome() {
   return process.env.DSH_HOME ?? join2(homedir(), ".dsh");
 }
@@ -973,7 +977,7 @@ function acpGraphRecall(query, limit = 5) {
     try {
       const q = String(query ?? "").toLowerCase().trim();
       if (!q) return [];
-      const matchQ = JSON.stringify(q) + "*";
+      const matchQ = ftsPhrase(q);
       const out = [];
       try {
         const rows = db.prepare("SELECT id FROM node_fts WHERE node_fts MATCH ? LIMIT ?").all(matchQ, limit);

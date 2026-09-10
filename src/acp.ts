@@ -17,6 +17,13 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { GraphStore } from './graph.ts';
 
+/** FTS5 phrase builder: quotes every token so user text (paths like C:\\x, "*", ":", quotes)
+ * can never be parsed as column filters or operators. Falls back to a harmless empty phrase. */
+function ftsPhrase(q: unknown): string {
+  const toks = String(q ?? '').toLowerCase().replace(/["'^*:()\[\]{}]/g, ' ').split(/\s+/).filter((t) => t.length > 1).slice(0, 8);
+  return toks.length ? toks.map((t) => '"' + t + '"').join(' OR ') : '""';
+}
+
 function dshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh');
 }
@@ -104,7 +111,7 @@ export function acpGraphRecall(query: string, limit = 5): { node: string; summar
     try {
       const q = String(query ?? '').toLowerCase().trim();
       if (!q) return [];
-      const matchQ = JSON.stringify(q) + '*';
+      const matchQ = ftsPhrase(q);
       const out: { node: string; summary: string; score: number }[] = [];
       // 1) 实体 FTS 命中 → 带出 checkpoint
       try {
