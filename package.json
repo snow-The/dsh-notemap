@@ -1,12 +1,11 @@
 {
   "name": "@snow-the/dsh-notemap",
-  "version": "0.11.3",
-  "description": "Networked knowledge graph for DeepSeek Harness: infinite canvas of notes with quantified relations (weights/confidence), graph algorithms (BFS/DFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots + change streams, cytoscape-compatible JSON export.",
+  "version": "0.12.0",
+  "description": "Shared knowledge graph for DeepSeek Harness: notes with quantified relations (weights/confidence), graph algorithms (BFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots, and a cross-session/cross-agent fusion index. Headless: agents query the graph, no canvas UI.",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "license": "MIT",
@@ -20,13 +19,11 @@
     "deepseek-harness"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning && esbuild web/components.js --bundle --format=esm --outfile=web/lit.bundle.js --log-level=warning",
+    "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning",
     "test": "node --test"
   },
   "files": [
     "dist",
-    "client.js",
-    "web",
     "cordis.patch.yml",
     "LICENSE",
     "README.md"
@@ -34,13 +31,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime"
-      ],
-      "immediately": false
     }
   },
   "repository": {

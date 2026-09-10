@@ -13,7 +13,6 @@ const defineTool = (o: any) => {
   }
   return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: 'json' }, render: () => [] } });
 };
-import { registerUi, disposeUi, type UiCtx } from './ui.ts';
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
@@ -24,7 +23,9 @@ import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts'
 
 export const name = 'dsh-notemap';
 
-export const inject = ['tools', 'webServer'] as const;
+// UI removed (2026-09-11): the infinite-canvas client kept blowing up, and the
+// graph is meant to be queried by agents, not drawn. Tools only - no webServer.
+export const inject = ['tools'] as const;
 
 
 // ---------- session import (knowledge extraction) ----------
@@ -215,10 +216,9 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
   return { scanned: files.length, sessions, checkpoints, events, assistants, skipped, imported };
 }
 
-export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & UiCtx): void {
+export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): void {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
-  void registerUi(ctx);
 
   reg(defineTool({
     name: 'notemap_add',
@@ -566,6 +566,5 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } } & 
 }
 
 export function dispose(): void {
-  try { disposeUi(); } catch { /* noop */ }
   closeStore();
 }

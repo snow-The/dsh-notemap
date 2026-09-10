@@ -1,9 +1,6 @@
 // src/index.ts
 import { defineTool as dshDefineTool } from "@deepseek-ai/dsh-tools";
 
-// src/ui.ts
-import { readFile } from "node:fs/promises";
-
 // src/graph.ts
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
@@ -838,9 +835,6 @@ function linkNotes(args) {
 function removeNote(id) {
   return getStore().removeNode(id);
 }
-function unlinkNotes(args) {
-  return getStore().removeEdge(args.source, args.target, args.type ?? "related");
-}
 function clearAll() {
   return getStore().clearAll();
 }
@@ -901,140 +895,114 @@ function filterNodesOf(args) {
   return getStore().filterNodes(args.filter ?? {}, args.limit ?? 50);
 }
 
-// src/ui.ts
-var sendFile = (res, type, body) => {
-  res.writeHead(200, { "content-type": type });
-  res.end(body);
-};
-var sendJson = (res, obj, code = 200) => {
-  res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(obj));
-};
-var readBody = (req) => new Promise((resolve, reject) => {
-  let data = "";
-  req.on("data", (chunk) => {
-    data += chunk.toString("utf8");
-  });
-  req.on("end", () => resolve(data));
-  req.on("error", reject);
-});
-async function apiHandler(req, res) {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const route = url.pathname.replace(/^\/notemap\/api/, "") || "/";
-  const method = req.method ?? "GET";
+// src/acp.ts
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { existsSync } from "node:fs";
+import { join as join2 } from "node:path";
+import { homedir } from "node:os";
+function dshHome() {
+  return process.env.DSH_HOME ?? join2(homedir(), ".dsh");
+}
+function acpGraphPath() {
+  return join2(dshHome(), "graph", "graph.db");
+}
+function acpGraphAvailable() {
   try {
-    if (route === "/graph" && method === "GET") {
-      sendJson(res, exportGraph());
-      return;
+    if (!existsSync(acpGraphPath())) return false;
+    const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS c FROM checkpoints").get();
+      return (row?.c ?? 0) > 0;
+    } finally {
+      db.close();
     }
-    if (route === "/stats" && method === "GET") {
-      sendJson(res, graphStats());
-      return;
-    }
-    if (route === "/related" && method === "GET") {
-      const id = url.searchParams.get("id") ?? "";
-      const limit = Number(url.searchParams.get("limit") ?? 10);
-      sendJson(res, findRelated({ id, limit }));
-      return;
-    }
-    if (route === "/add" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      sendJson(res, addNote({ title: String(body.title ?? "untitled"), content: body.content, type: body.type }));
-      return;
-    }
-    if (route === "/link" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      sendJson(res, linkNotes({ source: String(body.source), target: String(body.target), type: body.type, weight: body.weight, confidence: body.confidence }));
-      return;
-    }
-    if (route === "/unlink" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      sendJson(res, { unlinked: unlinkNotes({ source: String(body.source), target: String(body.target), type: body.type }) });
-      return;
-    }
-    if (route === "/project" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      const events = Array.isArray(body.events) ? body.events : [];
-      const created = [];
-      for (const ev of events) {
-        if (!ev || typeof ev.id !== "string") continue;
-        const title = String(ev.title ?? "event");
-        const content = typeof ev.content === "string" ? ev.content : "";
-        const type = typeof ev.type === "string" ? ev.type : "session-event";
-        try {
-          const node = addNote({ id: ev.id, title, content, type });
-          created.push(node.id);
-          if (typeof ev.parentId === "string" && ev.parentId && ev.parentId !== ev.id) {
-            linkNotes({ source: ev.parentId, target: ev.id, type: ev.edgeType ?? "follows", weight: ev.weight ?? 0.8, confidence: 1 });
-          }
-        } catch {
-        }
-      }
-      sendJson(res, { ok: true, created: created.length });
-      return;
-    }
-    if (route === "/search" && method === "GET") {
-      const q = url.searchParams.get("q") ?? "";
-      sendJson(res, searchNotes({ q, limit: 20 }));
-      return;
-    }
-    if (route === "/import-session" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      sendJson(res, await importSessions({ limit: body.limit, force: body.force }));
-      return;
-    }
-    if (route === "/remove" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      sendJson(res, { removed: removeNote(String(body.id ?? "")) });
-      return;
-    }
-    if (route === "/clear" && method === "POST") {
-      const body = JSON.parse(await readBody(req) || "{}");
-      if (body.confirm !== true) {
-        sendJson(res, { cleared: false, reason: "confirm=true required" });
-        return;
-      }
-      sendJson(res, { cleared: true, ...clearAll() });
-      return;
-    }
-    sendJson(res, { error: "not found" }, 404);
-  } catch (err) {
-    sendJson(res, { error: err?.message ?? String(err) }, 500);
+  } catch {
+    return false;
   }
 }
-async function registerUi(ctx) {
-  const ws = ctx.webServer;
-  if (!ws) return;
-  const base = new URL("../web/", import.meta.url);
-  const read = (p) => readFile(new URL(p, base), "utf8");
-  ws.register({ kind: "exact", path: "/notemap", handler: (_req, res) => {
-    res.writeHead(302, { location: "/notemap/" });
-    res.end();
-  } });
-  ws.register({ kind: "exact", path: "/notemap/", handler: async (_req, res) => {
-    sendFile(res, "text/html; charset=utf-8", await read("index.html"));
-  } });
-  ws.register({ kind: "exact", path: "/notemap/app.js", handler: async (_req, res) => {
-    sendFile(res, "text/javascript; charset=utf-8", await read("app.js"));
-  } });
-  ws.register({ kind: "exact", path: "/notemap/lit.bundle.js", handler: async (_req, res) => {
-    sendFile(res, "text/javascript; charset=utf-8", await read("lit.bundle.js"));
-  } });
-  ws.register({ kind: "exact", path: "/notemap/styles.css", handler: async (_req, res) => {
-    sendFile(res, "text/css; charset=utf-8", await read("styles.css"));
-  } });
-  ws.register({ kind: "exact", path: "/notemap/litegraph.js", handler: async (_req, res) => {
-    sendFile(res, "text/javascript; charset=utf-8", await read("litegraph.js"));
-  } });
-  ws.register({ kind: "exact", path: "/notemap/litegraph.css", handler: async (_req, res) => {
-    sendFile(res, "text/css; charset=utf-8", await read("litegraph.css"));
-  } });
-  ws.register({ kind: "prefix", path: "/notemap/api", handler: apiHandler });
-}
-function disposeUi() {
+function importFromAcpGraph(store2, _force = false) {
+  const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
   try {
-    closeStore();
+    const entRows = db.prepare("SELECT id, kind, title, mention_count FROM nodes").all();
+    const nodes = [];
+    for (const r of entRows) {
+      nodes.push({
+        id: "acp:" + r.id,
+        type: "acp-entity",
+        title: r.title || r.id,
+        content: "ACP \u5B9E\u4F53 [" + (r.kind ?? "concept") + "] \u63D0\u53CA " + (r.mention_count ?? 0) + " \u6B21",
+        meta: { acpKind: r.kind, acpMentions: r.mention_count, source: "acp_graph" }
+      });
+    }
+    const cpRows = db.prepare("SELECT session_id, seq_start, seq_end, summary, created_at FROM checkpoints").all();
+    const cpNodes = [];
+    for (const c of cpRows) {
+      cpNodes.push({
+        id: "acp-cp:" + c.session_id + ":" + c.seq_start,
+        type: "checkpoint",
+        title: "checkpoint s" + c.seq_start + "-" + c.seq_end,
+        content: c.summary,
+        meta: { session: c.session_id, seqStart: c.seq_start, seqEnd: c.seq_end, source: "acp_graph" }
+      });
+    }
+    nodes.push(...cpNodes);
+    const edgeRows = db.prepare("SELECT source, target, relation, weight FROM edges").all();
+    const edges = [];
+    for (const e of edgeRows) {
+      edges.push({ source: "acp:" + e.source, target: "acp:" + e.target, type: e.relation || "co-occurs", weight: e.weight ?? 1, meta: { source: "acp_graph" } });
+    }
+    const cnRows = db.prepare("SELECT session_id, seq_start, node_id FROM checkpoint_nodes").all();
+    for (const cn of cnRows) {
+      edges.push({ source: "acp:" + cn.node_id, target: "acp-cp:" + cn.session_id + ":" + cn.seq_start, type: "appears-in", weight: 1, meta: { source: "acp_graph" } });
+    }
+    const n1 = store2.upsertNodesBatch(nodes);
+    const n2 = store2.upsertEdgesBatch(edges);
+    return { entities: entRows.length, checkpoints: cpRows.length, edges: n2 };
+  } finally {
+    db.close();
+  }
+}
+function acpGraphRecall(query, limit = 5) {
+  try {
+    if (!acpGraphAvailable()) return [];
+    const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
+    try {
+      const q = String(query ?? "").toLowerCase().trim();
+      if (!q) return [];
+      const matchQ = JSON.stringify(q) + "*";
+      const out = [];
+      try {
+        const rows = db.prepare("SELECT id FROM node_fts WHERE node_fts MATCH ? LIMIT ?").all(matchQ, limit);
+        for (const r of rows) {
+          const cps = db.prepare("SELECT c.summary, c.seq_start FROM checkpoints c JOIN checkpoint_nodes cn ON cn.session_id=c.session_id AND cn.seq_start=c.seq_start WHERE cn.node_id=? ORDER BY c.created_at DESC LIMIT 1").all(r.id);
+          if (cps.length) out.push({ node: r.id, summary: cps[0].summary, score: 1 });
+        }
+      } catch {
+      }
+      try {
+        const cps = db.prepare("SELECT session_id, seq_start, summary FROM cp_fts WHERE cp_fts MATCH ? LIMIT ?").all(matchQ, limit);
+        for (const c of cps) {
+          if (!out.some((o) => o.node === "cp:" + c.session_id + ":" + c.seq_start)) {
+            out.push({ node: "cp:" + c.session_id + ":" + c.seq_start, summary: c.summary, score: 0.8 });
+          }
+        }
+      } catch {
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const dedup = [];
+      for (const o of out) {
+        const key = o.node;
+        if (!seen.has(key)) {
+          seen.add(key);
+          dedup.push(o);
+        }
+      }
+      return dedup.slice(0, limit);
+    } finally {
+      db.close();
+    }
   } catch {
+    return [];
   }
 }
 
@@ -1052,7 +1020,7 @@ var defineTool = (o) => {
   return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: "json" }, render: () => [] } });
 };
 var name = "dsh-notemap";
-var inject = ["tools", "webServer"];
+var inject = ["tools"];
 var RT_CTX = "Current runtime context";
 var CHECKPOINT = "This is an automatically generated checkpoint";
 var SKIP_PREFIXES = ["<system-reminder>", "<available_skills>", "The available skill catalog changed"];
@@ -1079,11 +1047,11 @@ async function importSessions(opts) {
   const { execFileSync } = await import("node:child_process");
   const { readdirSync, statSync, readFileSync } = await import("node:fs");
   const { zstdDecompressSync } = await import("node:zlib");
-  const { join: join2 } = await import("node:path");
-  const { homedir } = await import("node:os");
+  const { join: join3 } = await import("node:path");
+  const { homedir: homedir2 } = await import("node:os");
   const { createHash } = await import("node:crypto");
   const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
-  const root = opts?.sessionsDir ?? join2(homedir(), ".dsh", "sessions");
+  const root = opts?.sessionsDir ?? join3(homedir2(), ".dsh", "sessions");
   const files = [];
   const walk = (dir) => {
     let entries = [];
@@ -1093,7 +1061,7 @@ async function importSessions(opts) {
       return;
     }
     for (const name2 of entries) {
-      const p = join2(dir, name2);
+      const p = join3(dir, name2);
       try {
         if (statSync(p).isDirectory()) walk(p);
         else if (name2.endsWith(".zstd")) files.push(p);
@@ -1229,7 +1197,6 @@ async function importSessions(opts) {
 function apply(ctx) {
   const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
-  void registerUi(ctx);
   reg(defineTool({
     name: "notemap_add",
     description: "Add a note node to the networked knowledge graph (dsh-notemap). Returns the created node.",
@@ -1446,13 +1413,24 @@ function apply(ctx) {
       },
       required: ["query"]
     },
-    execute: (args) => searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h) => ({
-      id: h.node?.id,
-      title: h.node?.title,
-      type: h.node?.type,
-      snippet: h.snippet,
-      linked: (h.neighbors ?? []).map((nb) => nb.id + " (" + nb.type + " w" + nb.weight + ")").join(", ")
-    }))
+    execute: (args) => {
+      const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h) => ({
+        id: h.node?.id,
+        title: h.node?.title,
+        type: h.node?.type,
+        snippet: h.snippet,
+        linked: (h.neighbors ?? []).map((nb) => nb.id + " (" + nb.type + " w" + nb.weight + ")").join(", ")
+      }));
+      const acp = acpGraphRecall(args.query, 3);
+      const acpHits = acp.map((h) => ({
+        id: h.node,
+        title: h.node,
+        type: "acp-checkpoint",
+        snippet: h.summary.slice(0, 120),
+        linked: "[acp_graph \u8DE8\u4F1A\u8BDD]"
+      }));
+      return [...acpHits, ...local].slice(0, args.limit ?? 10);
+    }
   }));
   reg(defineTool({
     name: "notemap_import_session",
@@ -1465,7 +1443,14 @@ function apply(ctx) {
       },
       required: []
     },
-    execute: (args) => importSessions({ limit: args?.limit, force: args?.force })
+    execute: (args) => {
+      if (acpGraphAvailable()) {
+        const store2 = getStore();
+        const st = importFromAcpGraph(store2, args?.force ?? false);
+        return { source: "acp_graph", entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+      }
+      return importSessions({ limit: args?.limit, force: args?.force });
+    }
   }));
   reg(defineTool({
     name: "notemap_fusion",
@@ -1534,10 +1519,6 @@ function apply(ctx) {
   }));
 }
 function dispose() {
-  try {
-    disposeUi();
-  } catch {
-  }
   closeStore();
 }
 export {

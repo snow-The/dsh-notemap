@@ -1,6 +1,5 @@
-import { type UiCtx } from './ui.ts';
 export declare const name = "dsh-notemap";
-export declare const inject: readonly ['tools', 'webServer'];
+export declare const inject: readonly ['tools'];
 export declare function importSessions(opts?: {
     limit?: number;
     maxLines?: number;
@@ -19,5 +18,5 @@ export declare function apply(ctx: {
     tools: {
         register: (def: unknown) => unknown;
     };
-} & UiCtx): void;
+}): void;
 export declare function dispose(): void;
