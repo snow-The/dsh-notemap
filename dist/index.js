@@ -1020,6 +1020,9 @@ import { join as join3 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 
 // src/relations.ts
+function consensusBoost(sourceCount) {
+  return 1 + Math.log(1 + Math.max(0, sourceCount));
+}
 function betaConfidence(samples, prior = 0.5, weight = 100) {
   if (!Number.isFinite(samples) || samples <= 0) return prior;
   return (prior * weight + samples) / (weight + samples);
@@ -1091,9 +1094,11 @@ function buildNetwork(options = {}) {
     acp_available: false,
     memory_available: false,
     truncated_edges: false,
-    dropped_edges: 0
+    dropped_edges: 0,
+    digest: 0
   };
   const nodeRows = [];
+  const digestRows = [];
   const edgeRows = [];
   const acp = openReadOnly(acpGraphPath2());
   if (acp !== null && tableExists(acp, "nodes")) {
@@ -1156,8 +1161,12 @@ function buildNetwork(options = {}) {
           stats.delegations++;
         }
       }
+      const titles = /* @__PURE__ */ new Map();
+      const kinds = /* @__PURE__ */ new Map();
       for (const n of rawNodes) {
         const id = String(n.id);
+        titles.set(id, String(n.title ?? id));
+        if (n.kind !== void 0 && n.kind !== null) kinds.set(id, String(n.kind));
         nodeRows.push({
           id: `acp:${id}`,
           type: `entity:${String(n.kind ?? "term")}`,
@@ -1175,6 +1184,45 @@ function buildNetwork(options = {}) {
         });
         stats.entities++;
       }
+      const agentKindOf = /* @__PURE__ */ new Map();
+      for (const [sid, meta] of sourceIdToSession) agentKindOf.set(sid, meta.agent_kind);
+      const ranked = [...sourcesOf.entries()].map(([id, set]) => {
+        const kinds2 = [...new Set([...set].map((sid) => agentKindOf.get(sid) ?? "main"))].sort();
+        return { id, sources: set.size, agentKinds: kinds2, mentions: mentionCount.get(id) ?? 0, lastSeen: lastSeenOf.get(id) ?? 0 };
+      }).filter((r) => r.sources >= 2).sort((a, b) => b.sources - a.sources || b.mentions - a.mentions).slice(0, options.maxDigest ?? 300);
+      for (const r of ranked) {
+        const consensus = consensusBoost(r.sources);
+        const confidence = betaConfidence(r.mentions);
+        const recency = recencyDecay(r.lastSeen);
+        nodeRows.push({
+          id: `digest:${r.id}`,
+          type: "consensus",
+          title: titles.get(r.id) ?? r.id,
+          content: "",
+          meta: {
+            acp_id: r.id,
+            kind: kinds.get(r.id) ?? null,
+            sources: r.sources,
+            agent_kinds: r.agentKinds,
+            mentions: r.mentions,
+            last_seen: r.lastSeen || null,
+            score: Number((consensus * confidence * recency).toFixed(6)),
+            consensus: Number(consensus.toFixed(6)),
+            confidence: Number(confidence.toFixed(6)),
+            recency: Number(recency.toFixed(6))
+          }
+        });
+      }
+      stats.digest = ranked.length;
+      digestRows.push(...ranked.map((r) => ({
+        id: r.id,
+        title: titles.get(r.id) ?? r.id,
+        kind: kinds.get(r.id) ?? null,
+        sources: r.sources,
+        agent_kinds: r.agentKinds,
+        mentions: r.mentions,
+        score: consensusBoost(r.sources) * betaConfidence(r.mentions) * recencyDecay(r.lastSeen)
+      })));
       if (tableExists(acp, "checkpoints")) {
         const cpCols = columnsOf(acp, "checkpoints");
         const cpSel = pick(cpCols, ["session_id", "seq_start", "seq_end", "summary", "created_at"]).join(", ");

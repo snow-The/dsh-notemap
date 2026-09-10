@@ -19,7 +19,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getStore } from './notemap.ts';
-import { betaConfidence, recencyDecay } from './relations.ts';
+import { betaConfidence, consensusBoost, recencyDecay } from './relations.ts';
 
 const LAYERS = ['soul', 'user', 'project', 'fact', 'lesson', 'topic', 'rules'] as const;
 
@@ -64,6 +64,8 @@ export interface NetworkStats {
   /** Edges whose endpoint is missing from the node set (pruned checkpoints,
    *  entities deleted in the source graph). Dropped, never faked. */
   dropped_edges: number;
+  /** Entities corroborated by 2+ contexts/agents - published as 'consensus' nodes. */
+  digest: number;
 }
 
 export interface BuildOptions {
@@ -77,6 +79,8 @@ export interface BuildOptions {
   maxEdges?: number;
   /** Cap on entities considered when linking memories (default 4000). */
   maxMemoryLinks?: number;
+  /** Cap on published consensus-digest nodes, best corroborated first (default 300). */
+  maxDigest?: number;
 }
 
 /**
@@ -89,9 +93,10 @@ export function buildNetwork(options: BuildOptions = {}): NetworkStats {
   const stats: NetworkStats = {
     built_at, entities: 0, sources: 0, checkpoints: 0, memories: 0, edges: 0,
     memory_links: 0, delegations: 0, agents: { main: 0, subagent: 0 },
-    acp_available: false, memory_available: false, truncated_edges: false, dropped_edges: 0,
+    acp_available: false, memory_available: false, truncated_edges: false, dropped_edges: 0, digest: 0,
   };
   const nodeRows: { id: string; type: string; title: string; content: string; meta: Record<string, unknown> }[] = [];
+  const digestRows: { id: string; title: string; kind: string | null; sources: number; agent_kinds: string[]; mentions: number; score: number }[] = [];
   const edgeRows: { source: string; target: string; type: string; weight: number; confidence: number; meta: Record<string, unknown> }[] = [];
 
   // ---------- half one: handoff's graph (collect / organise) ----------
@@ -152,8 +157,12 @@ export function buildNetwork(options: BuildOptions = {}): NetworkStats {
           stats.delegations++;
         }
       }
+      const titles = new Map<string, string>();
+      const kinds = new Map<string, string>();
       for (const n of rawNodes) {
         const id = String(n.id);
+        titles.set(id, String(n.title ?? id));
+        if (n.kind !== undefined && n.kind !== null) kinds.set(id, String(n.kind));
         nodeRows.push({
           id: `acp:${id}`, type: `entity:${String(n.kind ?? 'term')}`, title: String(n.title ?? id),
           content: '', meta: {
@@ -166,6 +175,43 @@ export function buildNetwork(options: BuildOptions = {}): NetworkStats {
         });
         stats.entities++;
       }
+
+      // Consensus digest: the entities that SEVERAL contexts/agents independently
+      // reached. Published as derived nodes (type 'consensus') so the other layers can
+      // consume the relation layer's judgement without importing its code: acp-memory's
+      // injection reads these rows read-only when they exist. Derived data, rebuildable
+      // at any time - memory's own layers stay authoritative.
+      const agentKindOf = new Map<number, string>();
+      for (const [sid, meta] of sourceIdToSession) agentKindOf.set(sid, meta.agent_kind);
+      const ranked = [...sourcesOf.entries()]
+        .map(([id, set]) => {
+          const kinds = [...new Set([...set].map((sid) => agentKindOf.get(sid) ?? 'main'))].sort();
+          return { id, sources: set.size, agentKinds: kinds, mentions: mentionCount.get(id) ?? 0, lastSeen: lastSeenOf.get(id) ?? 0 };
+        })
+        .filter((r) => r.sources >= 2)
+        .sort((a, b) => b.sources - a.sources || b.mentions - a.mentions)
+        .slice(0, options.maxDigest ?? 300);
+      for (const r of ranked) {
+        const consensus = consensusBoost(r.sources);
+        const confidence = betaConfidence(r.mentions);
+        const recency = recencyDecay(r.lastSeen);
+        nodeRows.push({
+          id: `digest:${r.id}`, type: 'consensus', title: titles.get(r.id) ?? r.id,
+          content: '',
+          meta: {
+            acp_id: r.id, kind: kinds.get(r.id) ?? null, sources: r.sources, agent_kinds: r.agentKinds,
+            mentions: r.mentions, last_seen: r.lastSeen || null,
+            score: Number((consensus * confidence * recency).toFixed(6)),
+            consensus: Number(consensus.toFixed(6)), confidence: Number(confidence.toFixed(6)), recency: Number(recency.toFixed(6)),
+          },
+        });
+      }
+      stats.digest = ranked.length;
+      digestRows.push(...ranked.map((r) => ({
+        id: r.id, title: titles.get(r.id) ?? r.id, kind: kinds.get(r.id) ?? null,
+        sources: r.sources, agent_kinds: r.agentKinds, mentions: r.mentions,
+        score: consensusBoost(r.sources) * betaConfidence(r.mentions) * recencyDecay(r.lastSeen),
+      })));
       if (tableExists(acp, 'checkpoints')) {
         const cpCols = columnsOf(acp, 'checkpoints');
         const cpSel = pick(cpCols, ['session_id', 'seq_start', 'seq_end', 'summary', 'created_at']).join(', ');
