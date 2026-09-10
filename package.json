@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --log-level=warning",
-    "test": "node --test"
+    "test": "node --test test/relations.test.mjs test/verify.test.mjs"
   },
   "files": [
     "dist",

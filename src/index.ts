@@ -75,11 +75,15 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
 
   const root = opts?.sessionsDir ?? join(homedir(), '.dsh', 'sessions');
   const files: string[] = [];
-  // One session = one directory. DSH migrates a log to a new generation
-  // (session.v<N>.jsonl.zstd) and keeps the old file beside it, so collecting every
-  // *.zstd imported each migrated session TWICE (once per generation). Take the
-  // highest generation per directory; backups never match the pattern.
-  const best = new Map<string, { v: number; path: string }>();
+  // One session = one directory, but a directory may hold SEVERAL logs for it: DSH
+  // migrates a log to a new generation (session.v<N>.jsonl.zstd) and keeps the old file
+  // beside it, so collecting every *.zstd imported each migrated session TWICE.
+  // Rule: gather the candidates per directory, then keep exactly one -
+  //   * the highest generation among DSH-named logs (session[.vN].jsonl.zstd);
+  //   * otherwise the newest .zstd (importers are also used on arbitrary fixtures).
+  // Backups (*.bak-*) are never candidates.
+  interface Candidate { path: string; generation: number; dshNamed: boolean; mtime: number }
+  const byDir = new Map<string, Candidate[]>();
   const walk = (dir: string) => {
     let entries: string[] = [];
     try { entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name); } catch { return; }
@@ -87,16 +91,30 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
       const p = join(dir, name);
       try {
         if (statSync(p).isDirectory()) { walk(p); continue; }
+        if (!name.endsWith('.zstd') || name.includes('.bak-')) continue;
         const m = /^session(?:\.v(\d+))?\.jsonl\.zstd$/.exec(name);
-        if (m === null) continue;
-        const v = m[1] === undefined ? 0 : Number(m[1]);
-        const prev = best.get(dir);
-        if (prev === undefined || v > prev.v) best.set(dir, { v, path: p });
+        const list = byDir.get(dir) ?? [];
+        list.push({
+          path: p,
+          generation: m === null ? -1 : (m[1] === undefined ? 0 : Number(m[1])),
+          dshNamed: m !== null,
+          mtime: statSync(p).mtimeMs,
+        });
+        byDir.set(dir, list);
       } catch { /* skip */ }
     }
   };
   walk(root);
-  for (const entry of best.values()) files.push(entry.path);
+  for (const list of byDir.values()) {
+    const named = list.filter((c) => c.dshNamed);
+    if (named.length > 0) {
+      named.sort((a, b) => b.generation - a.generation);
+      files.push(named[0].path);
+      continue;
+    }
+    list.sort((a, b) => b.mtime - a.mtime);
+    files.push(list[0].path);
+  }
 
   const limit = opts?.limit ?? 30;
   const maxLines = opts?.maxLines ?? 2000;
