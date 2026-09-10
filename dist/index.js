@@ -1006,6 +1006,381 @@ function acpGraphRecall(query, limit = 5) {
   }
 }
 
+// src/network.ts
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { existsSync as existsSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+
+// src/relations.ts
+function betaConfidence(samples, prior = 0.5, weight = 100) {
+  if (!Number.isFinite(samples) || samples <= 0) return prior;
+  return (prior * weight + samples) / (weight + samples);
+}
+function recencyDecay(lastSeenMs, nowMs = Date.now(), halfLifeMs = 30 * 24 * 3600 * 1e3) {
+  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) return 0.5;
+  const age = Math.max(0, nowMs - lastSeenMs);
+  if (!Number.isFinite(halfLifeMs) || halfLifeMs <= 0) return 1;
+  return Math.pow(0.5, age / halfLifeMs);
+}
+
+// src/network.ts
+var LAYERS = ["soul", "user", "project", "fact", "lesson", "topic", "rules"];
+function dshHome2() {
+  return process.env.DSH_DATA_DIR ?? process.env.DSH_HOME ?? join3(homedir2(), ".dsh");
+}
+function acpGraphPath2() {
+  return join3(dshHome2(), "graph", "graph.db");
+}
+function memoryDbPath() {
+  return join3(dshHome2(), "memory", "memory.db");
+}
+function openReadOnly(path) {
+  try {
+    if (!existsSync2(path)) return null;
+    return new DatabaseSync3(path, { readOnly: true });
+  } catch {
+    return null;
+  }
+}
+function tableExists(db, table) {
+  try {
+    return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(table) !== void 0;
+  } catch {
+    return false;
+  }
+}
+function columnsOf(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function pick(cols, wanted) {
+  return wanted.filter((c) => cols.has(c));
+}
+function norm(s) {
+  return String(s ?? "").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ").trim();
+}
+function buildNetwork(options = {}) {
+  const store2 = getStore();
+  const built_at = (/* @__PURE__ */ new Date()).toISOString();
+  const stats = {
+    built_at,
+    entities: 0,
+    sources: 0,
+    checkpoints: 0,
+    memories: 0,
+    edges: 0,
+    memory_links: 0,
+    delegations: 0,
+    agents: { main: 0, subagent: 0 },
+    acp_available: false,
+    memory_available: false,
+    truncated_edges: false
+  };
+  const nodeRows = [];
+  const edgeRows = [];
+  const acp = openReadOnly(acpGraphPath2());
+  if (acp !== null && tableExists(acp, "nodes")) {
+    stats.acp_available = true;
+    try {
+      const nodeCols = columnsOf(acp, "nodes");
+      const nodeSel = pick(nodeCols, ["id", "kind", "title", "first_seen", "last_seen"]).join(", ");
+      const rawNodes = acp.prepare(`SELECT ${nodeSel} FROM nodes`).all();
+      const mentionCount = /* @__PURE__ */ new Map();
+      const sourcesOf = /* @__PURE__ */ new Map();
+      const lastSeenOf = /* @__PURE__ */ new Map();
+      let sourceIdToSession = /* @__PURE__ */ new Map();
+      if (tableExists(acp, "sources")) {
+        const srcCols = columnsOf(acp, "sources");
+        const srcSel = pick(srcCols, ["id", "session_id", "parent_session", "agent_kind", "cwd", "created_at", "last_seen"]).join(", ");
+        const srcRows = acp.prepare(`SELECT ${srcSel} FROM sources`).all();
+        for (const s of srcRows) {
+          sourceIdToSession.set(Number(s.id), { session_id: String(s.session_id), agent_kind: String(s.agent_kind ?? "main"), cwd: s.cwd ?? null });
+          const id = `src:${s.session_id}`;
+          nodeRows.push({
+            id,
+            type: s.agent_kind === "subagent" ? "agent" : "session",
+            title: String(s.session_id),
+            content: s.cwd === null || s.cwd === void 0 ? "" : String(s.cwd),
+            meta: { agent_kind: s.agent_kind ?? "main", parent: s.parent_session ?? null, cwd: s.cwd ?? null, created_at: s.created_at ?? null }
+          });
+          if (s.agent_kind === "subagent") stats.agents.subagent++;
+          else stats.agents.main++;
+          stats.sources++;
+        }
+      }
+      if (tableExists(acp, "mentions")) {
+        const mentionRows = acp.prepare("SELECT source_id, node_id, count, last_seen FROM mentions").all();
+        for (const m of mentionRows) {
+          const nid = String(m.node_id);
+          mentionCount.set(nid, (mentionCount.get(nid) ?? 0) + Number(m.count ?? 1));
+          let set = sourcesOf.get(nid);
+          if (set === void 0) {
+            set = /* @__PURE__ */ new Set();
+            sourcesOf.set(nid, set);
+          }
+          set.add(Number(m.source_id));
+          const seen = Number(m.last_seen ?? 0);
+          if (seen > (lastSeenOf.get(nid) ?? 0)) lastSeenOf.set(nid, seen);
+        }
+      }
+      if (tableExists(acp, "delegations")) {
+        for (const d of acp.prepare("SELECT parent_source, child_source FROM delegations").all()) {
+          const parent = sourceIdToSession.get(Number(d.parent_source));
+          const child = sourceIdToSession.get(Number(d.child_source));
+          if (parent === void 0 || child === void 0) continue;
+          edgeRows.push({
+            source: `src:${parent.session_id}`,
+            target: `src:${child.session_id}`,
+            type: "delegates",
+            weight: 1,
+            confidence: 1,
+            meta: {}
+          });
+          stats.delegations++;
+        }
+      }
+      for (const n of rawNodes) {
+        const id = String(n.id);
+        nodeRows.push({
+          id: `acp:${id}`,
+          type: `entity:${String(n.kind ?? "term")}`,
+          title: String(n.title ?? id),
+          content: "",
+          meta: {
+            acp_id: id,
+            kind: n.kind ?? null,
+            mentions: mentionCount.get(id) ?? 0,
+            sources: [...sourcesOf.get(id) ?? /* @__PURE__ */ new Set()].length,
+            last_seen: lastSeenOf.get(id) ?? null,
+            confidence: betaConfidence(mentionCount.get(id) ?? 0),
+            recency: recencyDecay(lastSeenOf.get(id) ?? 0)
+          }
+        });
+        stats.entities++;
+      }
+      if (tableExists(acp, "checkpoints")) {
+        const cpCols = columnsOf(acp, "checkpoints");
+        const cpSel = pick(cpCols, ["session_id", "seq_start", "seq_end", "summary", "created_at"]).join(", ");
+        for (const c of acp.prepare(`SELECT ${cpSel} FROM checkpoints`).all()) {
+          nodeRows.push({
+            id: `cp:${c.session_id}:${c.seq_start}`,
+            type: "checkpoint",
+            title: `${c.session_id} @${c.seq_start}`,
+            content: String(c.summary ?? "").slice(0, 2e3),
+            meta: { session_id: c.session_id, seq_start: c.seq_start, seq_end: c.seq_end ?? null, created_at: c.created_at ?? null }
+          });
+          edgeRows.push({ source: `src:${c.session_id}`, target: `cp:${c.session_id}:${c.seq_start}`, type: "contains", weight: 1, confidence: 1, meta: {} });
+          stats.checkpoints++;
+        }
+      }
+      if (tableExists(acp, "checkpoint_nodes")) {
+        for (const cn of acp.prepare("SELECT session_id, seq_start, node_id FROM checkpoint_nodes").all()) {
+          edgeRows.push({
+            source: `cp:${cn.session_id}:${cn.seq_start}`,
+            target: `acp:${cn.node_id}`,
+            type: "mentions",
+            weight: 1,
+            confidence: betaConfidence(mentionCount.get(String(cn.node_id)) ?? 0),
+            meta: {}
+          });
+        }
+      }
+      if (tableExists(acp, "edges")) {
+        const eCols = columnsOf(acp, "edges");
+        const eSel = pick(eCols, ["source", "target", "relation", "weight", "confidence"]).join(", ");
+        const relationExpr = eCols.has("relation") ? "relation" : "''";
+        const weightExpr = eCols.has("weight") ? "weight" : "1";
+        const rows = acp.prepare(`SELECT ${eSel} FROM edges ORDER BY ${weightExpr} DESC LIMIT ?`).all(options.maxEdges ?? 2e5);
+        const total = acp.prepare("SELECT COUNT(*) AS n FROM edges").get()?.n ?? rows.length;
+        stats.truncated_edges = total > rows.length;
+        for (const e of rows) {
+          edgeRows.push({
+            source: `acp:${e.source}`,
+            target: `acp:${e.target}`,
+            type: String(e.relation ?? "related"),
+            weight: Number(e.weight ?? 1),
+            confidence: Number(e.confidence ?? 1),
+            meta: {}
+          });
+          stats.edges++;
+        }
+      }
+    } catch {
+    } finally {
+      try {
+        acp.close();
+      } catch {
+      }
+    }
+  }
+  const mem = openReadOnly(memoryDbPath());
+  const entityTitles = [];
+  if (options.memory !== false) {
+    for (const row of nodeRows) if (row.id.startsWith("acp:")) entityTitles.push({ id: row.id, needle: norm(row.title) });
+  }
+  if (mem !== null) {
+    stats.memory_available = true;
+    let links = 0;
+    const cap = options.maxMemoryLinks ?? 4e3;
+    try {
+      for (const layer of LAYERS) {
+        if (!tableExists(mem, layer)) continue;
+        const cols = columnsOf(mem, layer);
+        const sel = pick(cols, ["id", "content", "name", "title", "goal", "project", "importance", "status", "keywords", "created_at", "updated_at"]).join(", ");
+        for (const m of mem.prepare(`SELECT ${sel} FROM ${layer}`).all()) {
+          const id = `mem:${layer}:${m.id}`;
+          const title = String(m.title ?? m.name ?? String(m.content ?? "").slice(0, 60));
+          const body = [m.content, m.goal, m.keywords].filter((v) => v !== void 0 && v !== null).join(" \n ");
+          nodeRows.push({
+            id,
+            type: `memory:${layer}`,
+            title,
+            content: String(body).slice(0, 4e3),
+            meta: { layer, project: m.project ?? null, importance: m.importance ?? 1, status: m.status ?? "active", created_at: m.created_at ?? null }
+          });
+          stats.memories++;
+          if (links < cap * 12) {
+            const hay = " " + norm(`${title} ${body}`) + " ";
+            let perMemory = 0;
+            for (const entity of entityTitles) {
+              if (entity.needle.length < 3) continue;
+              if (hay.includes(" " + entity.needle + " ") === false) continue;
+              edgeRows.push({ source: id, target: entity.id, type: "mentions", weight: 1, confidence: 0.7, meta: { via: "text" } });
+              links++;
+              if (++perMemory >= 12) break;
+            }
+          }
+        }
+      }
+    } catch {
+    } finally {
+      try {
+        mem.close();
+      } catch {
+      }
+    }
+    stats.memory_links = links;
+  }
+  const nodes = options.entities === false ? nodeRows.filter((n) => n.id.startsWith("mem:")) : nodeRows;
+  const edges = options.entities === false ? edgeRows.filter((e) => e.source.startsWith("mem:")) : edgeRows;
+  const storeAny = store2;
+  if (typeof storeAny.upsertNodesBatch === "function") storeAny.upsertNodesBatch(nodes);
+  else for (const n of nodes) store2.addNode(n);
+  if (typeof storeAny.upsertEdgesBatch === "function") storeAny.upsertEdgesBatch(edges);
+  else for (const e of edges) store2.addEdge(e);
+  return stats;
+}
+function agentTree() {
+  const acp = openReadOnly(acpGraphPath2());
+  if (acp === null || !tableExists(acp, "sources")) return [];
+  try {
+    const rows = acp.prepare(`
+      SELECT s.id, s.session_id, s.parent_session, s.agent_kind, s.cwd,
+             (SELECT COUNT(DISTINCT m.node_id) FROM mentions m WHERE m.source_id = s.id) AS entities,
+             (SELECT COALESCE(SUM(m.count), 0) FROM mentions m WHERE m.source_id = s.id) AS mentions,
+             (SELECT COUNT(*) FROM checkpoints c WHERE c.session_id = s.session_id) AS checkpoints
+      FROM sources s`).all();
+    const byId = /* @__PURE__ */ new Map();
+    for (const r of rows) {
+      byId.set(String(r.session_id), {
+        session_id: String(r.session_id),
+        agent_kind: String(r.agent_kind ?? "main"),
+        cwd: r.cwd ?? null,
+        parent: r.parent_session === void 0 || r.parent_session === null ? null : String(r.parent_session),
+        entities: Number(r.entities ?? 0),
+        mentions: Number(r.mentions ?? 0),
+        checkpoints: Number(r.checkpoints ?? 0),
+        children: []
+      });
+    }
+    for (const entry of byId.values()) {
+      if (entry.parent === null) continue;
+      byId.get(entry.parent)?.children.push(entry.session_id);
+    }
+    return [...byId.values()].sort((a, b) => b.entities - a.entities);
+  } catch {
+    return [];
+  } finally {
+    try {
+      acp.close();
+    } catch {
+    }
+  }
+}
+function consensusRecall(query, options = {}) {
+  const acp = openReadOnly(acpGraphPath2());
+  if (acp === null || !tableExists(acp, "nodes") || !tableExists(acp, "mentions")) return [];
+  try {
+    const rows = acp.prepare(`
+      SELECT m.node_id, m.source_id, n.title, n.kind, m.count, m.last_seen, s.session_id, s.agent_kind
+      FROM mentions m
+      JOIN nodes n ON n.id = m.node_id
+      LEFT JOIN sources s ON s.id = m.source_id
+      WHERE n.title LIKE ?`).all(`%${query}%`);
+    const byId = /* @__PURE__ */ new Map();
+    for (const r of rows) {
+      const list = byId.get(String(r.node_id));
+      if (list === void 0) byId.set(String(r.node_id), [r]);
+      else list.push(r);
+    }
+    const perSource = /* @__PURE__ */ new Map();
+    for (const list of byId.values()) {
+      for (const r of list) {
+        const arr = perSource.get(Number(r.source_id));
+        if (arr === void 0) perSource.set(Number(r.source_id), [r]);
+        else arr.push(r);
+      }
+    }
+    const lists = [...perSource.values()].map((arr) => arr.sort((a, b) => Number(b.count ?? 1) - Number(a.count ?? 1)).map((r) => String(r.node_id)));
+    const fused = /* @__PURE__ */ new Map();
+    lists.forEach((list, index) => {
+      list.forEach((id, rank) => {
+        const entry = fused.get(id) ?? { score: 0, sources: [] };
+        entry.score += 1 / ((options.k ?? 60) + rank + 1);
+        entry.sources.push(index);
+        fused.set(id, entry);
+      });
+    });
+    const now = Date.now();
+    const results = [...fused.entries()].map(([id, entry]) => {
+      const list = byId.get(id) ?? [];
+      const first = list[0];
+      const distinct = new Set(entry.sources).size;
+      const mentions = list.reduce((sum, r) => sum + Number(r.count ?? 1), 0);
+      const lastSeen = Math.max(...list.map((r) => Number(r.last_seen ?? 0)));
+      const confidence = betaConfidence(mentions);
+      const recency = recencyDecay(lastSeen, now);
+      const consensus = 1 + Math.log(1 + distinct);
+      return {
+        id,
+        title: String(first?.title ?? id),
+        kind: first?.kind === void 0 ? null : String(first.kind),
+        score: entry.score * consensus * confidence * recency,
+        sources: distinct,
+        agent_kinds: [...new Set(list.map((r) => String(r.agent_kind ?? "main")))],
+        sessions: [...new Set(list.map((r) => String(r.session_id ?? "?")))].slice(0, 5),
+        mentions,
+        confidence,
+        recency,
+        consensus
+      };
+    });
+    const minSources = options.minSources ?? 0;
+    return results.filter((r) => r.sources >= minSources).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, options.limit ?? 15);
+  } catch {
+    return [];
+  } finally {
+    try {
+      acp.close();
+    } catch {
+    }
+  }
+}
+
 // src/index.ts
 var defineTool = (o) => {
   let parameters = o.parameters;
@@ -1047,11 +1422,11 @@ async function importSessions(opts) {
   const { execFileSync } = await import("node:child_process");
   const { readdirSync, statSync, readFileSync } = await import("node:fs");
   const { zstdDecompressSync } = await import("node:zlib");
-  const { join: join3 } = await import("node:path");
-  const { homedir: homedir2 } = await import("node:os");
+  const { join: join4 } = await import("node:path");
+  const { homedir: homedir3 } = await import("node:os");
   const { createHash } = await import("node:crypto");
   const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
-  const root = opts?.sessionsDir ?? join3(homedir2(), ".dsh", "sessions");
+  const root = opts?.sessionsDir ?? join4(homedir3(), ".dsh", "sessions");
   const files = [];
   const best = /* @__PURE__ */ new Map();
   const walk = (dir) => {
@@ -1062,7 +1437,7 @@ async function importSessions(opts) {
       return;
     }
     for (const name2 of entries) {
-      const p = join3(dir, name2);
+      const p = join4(dir, name2);
       try {
         if (statSync(p).isDirectory()) {
           walk(p);
@@ -1524,6 +1899,45 @@ function apply(ctx) {
     execute: (args) => {
       if (args?.confirm !== true) return { cleared: false, reason: "confirm=true required" };
       return { cleared: true, ...clearAll() };
+    }
+  }));
+  reg(defineTool({
+    name: "notemap_network",
+    description: "Build/refresh the node network from handoff (graph + provenance) and memory (seven layers): entities, sessions/agents, checkpoints and memories as nodes, with weighted typed edges. Idempotent - ids are derived, so rebuilding converges.",
+    parameters: { type: "object", properties: {
+      minWeight: { type: "number", description: "Only import graph edges at or above this weight (default 1)" },
+      maxEdges: { type: "number", description: "Hard cap on imported graph edges, highest weight first (default 200000)" }
+    }, required: [] },
+    async execute(args) {
+      const stats = buildNetwork({ minWeight: args?.minWeight, maxEdges: args?.maxEdges });
+      const graph = graphStats();
+      return { ...stats, store_nodes: graph.nodes, store_edges: graph.edges };
+    }
+  }));
+  reg(defineTool({
+    name: "notemap_agents",
+    description: "The agent/session tree with each agent's contribution (entities, mentions, checkpoints) - the multi-agent view over the shared graph.",
+    parameters: { type: "object", properties: { limit: { type: "number", description: "Max rows (default 30)" } }, required: [] },
+    async execute(args) {
+      const rows = agentTree();
+      return {
+        total: rows.length,
+        main: rows.filter((r) => r.agent_kind === "main").length,
+        subagent: rows.filter((r) => r.agent_kind === "subagent").length,
+        rows: rows.slice(0, args?.limit ?? 30)
+      };
+    }
+  }));
+  reg(defineTool({
+    name: "notemap_consensus",
+    description: "Cross-context / cross-agent recall: every session and subagent that mentioned a matching entity ranks its own list, the lists are fused by reciprocal rank, and agreement across agents is boosted. Each hit reports which sessions and agent kinds contributed.",
+    parameters: { type: "object", properties: {
+      q: { type: "string", description: "Query text (matched against entity titles)" },
+      limit: { type: "number", description: "Max results (default 15)" },
+      minSources: { type: "number", description: "Only keep entities seen by at least this many distinct sources" }
+    }, required: ["q"] },
+    async execute(args) {
+      return { query: args.q, hits: consensusRecall(args.q, { limit: args?.limit, minSources: args?.minSources }) };
     }
   }));
 }

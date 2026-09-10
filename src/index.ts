@@ -20,6 +20,7 @@ import {
   searchFusedOf, filterNodesOf,
 } from './notemap.ts';
 import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts';
+import { buildNetwork, agentTree, consensusRecall } from './network.ts';
 
 export const name = 'dsh-notemap';
 
@@ -571,6 +572,45 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
     execute: (args: { confirm?: boolean }) => {
       if (args?.confirm !== true) return { cleared: false, reason: 'confirm=true required' };
       return { cleared: true, ...clearAll() };
+    },
+  }));
+
+  reg(defineTool({
+    name: 'notemap_network',
+    description: 'Build/refresh the node network from handoff (graph + provenance) and memory (seven layers): entities, sessions/agents, checkpoints and memories as nodes, with weighted typed edges. Idempotent - ids are derived, so rebuilding converges.',
+    parameters: { type: 'object', properties: {
+      minWeight: { type: 'number', description: 'Only import graph edges at or above this weight (default 1)' },
+      maxEdges: { type: 'number', description: 'Hard cap on imported graph edges, highest weight first (default 200000)' },
+    }, required: [] },
+    async execute(args: { minWeight?: number; maxEdges?: number }) {
+      const stats = buildNetwork({ minWeight: args?.minWeight, maxEdges: args?.maxEdges });
+      const graph = graphStats();
+      return { ...stats, store_nodes: graph.nodes, store_edges: graph.edges };
+    },
+  }));
+
+  reg(defineTool({
+    name: 'notemap_agents',
+    description: 'The agent/session tree with each agent\'s contribution (entities, mentions, checkpoints) - the multi-agent view over the shared graph.',
+    parameters: { type: 'object', properties: { limit: { type: 'number', description: 'Max rows (default 30)' } }, required: [] },
+    async execute(args: { limit?: number }) {
+      const rows = agentTree();
+      return { total: rows.length, main: rows.filter((r) => r.agent_kind === 'main').length,
+        subagent: rows.filter((r) => r.agent_kind === 'subagent').length,
+        rows: rows.slice(0, args?.limit ?? 30) };
+    },
+  }));
+
+  reg(defineTool({
+    name: 'notemap_consensus',
+    description: 'Cross-context / cross-agent recall: every session and subagent that mentioned a matching entity ranks its own list, the lists are fused by reciprocal rank, and agreement across agents is boosted. Each hit reports which sessions and agent kinds contributed.',
+    parameters: { type: 'object', properties: {
+      q: { type: 'string', description: 'Query text (matched against entity titles)' },
+      limit: { type: 'number', description: 'Max results (default 15)' },
+      minSources: { type: 'number', description: 'Only keep entities seen by at least this many distinct sources' },
+    }, required: ['q'] },
+    async execute(args: { q: string; limit?: number; minSources?: number }) {
+      return { query: args.q, hits: consensusRecall(args.q, { limit: args?.limit, minSources: args?.minSources }) };
     },
   }));
 }
