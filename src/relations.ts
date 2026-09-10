@@ -20,13 +20,35 @@
  * testable and lets both plugins share one implementation instead of two opinions.
  */
 
+/**
+ * Coerce a value to a finite number, else fall back.
+ *
+ * Hostile values reach these functions from SQL columns, JSON and caller arithmetic:
+ * NaN, Infinity, negatives, numeric strings. An unsanitised NaN poisons an entire
+ * ranking SILENTLY - every item sorts arbitrarily and no error is raised - which is the
+ * worst kind of wrong answer. A 3000-iteration fuzz run produced 6018 such defects, so
+ * every entry point below normalises its inputs.
+ */
+function num(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+/** Finite and at least zero - weights, counts, samples. */
+function nonNegative(value: unknown, fallback: number): number {
+  return Math.max(0, num(value, fallback));
+}
+/** Finite, inside [0,1] - confidences, decay factors, priors. */
+function unit(value: unknown, fallback: number): number {
+  return Math.min(1, Math.max(0, num(value, fallback)));
+}
+
 /** Reciprocal rank fusion over per-source ranked id lists (rank-only, so scores need not be comparable). */
 export function reciprocalRankFusion(
   lists: readonly (readonly string[])[],
   options: { k?: number; maxPerList?: number } = {},
 ): Map<string, { score: number; sources: number[]; ranks: number[] }> {
-  const k = options.k ?? 60;
-  const maxPerList = options.maxPerList ?? Infinity;
+  const k = nonNegative(options.k, 60) || 60;                 // k <= 0 would divide by rank only
+  const maxPerList = nonNegative(options.maxPerList, Infinity) || Infinity;
   const fused = new Map<string, { score: number; sources: number[]; ranks: number[] }>();
   lists.forEach((list, sourceIndex) => {
     const seen = new Set<string>();
@@ -45,21 +67,31 @@ export function reciprocalRankFusion(
 
 /** Consensus across distinct sources: agreement between agents is worth more than volume from one. */
 export function consensusBoost(sourceCount: number): number {
-  return 1 + Math.log(1 + Math.max(0, sourceCount));
+  return 1 + Math.log(1 + nonNegative(sourceCount, 0));
 }
 
 /** Beta-prior confidence from a mention count (prior 0.5, pseudo-count weight 100 by default). */
 export function betaConfidence(samples: number, prior = 0.5, weight = 100): number {
-  if (!Number.isFinite(samples) || samples <= 0) return prior;
-  return (prior * weight + samples) / (weight + samples);
+  const p = unit(prior, 0.5);
+  // Clamp the pseudo-counts: with 1e308 on both sides the expression overflows to
+  // Infinity/Infinity = NaN, and a NaN confidence silently voids a whole ranking.
+  const CAP = 1e12;
+  const w = Math.min(CAP, nonNegative(weight, 100));
+  const s = Math.min(CAP, nonNegative(samples, 0));
+  if (s <= 0) return p;
+  if (w <= 0) return p;                             // no prior weight: the prior stands
+  return unit((p * w + s) / (w + s), p);
 }
 
 /** Exponential recency decay: 1 at \`now\`, 0.5 after one half-life. */
 export function recencyDecay(lastSeenMs: number, nowMs = Date.now(), halfLifeMs = 30 * 24 * 3600 * 1000): number {
-  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) return 0.5;
-  const age = Math.max(0, nowMs - lastSeenMs);
-  if (!Number.isFinite(halfLifeMs) || halfLifeMs <= 0) return 1;
-  return Math.pow(0.5, age / halfLifeMs);
+  const seen = num(lastSeenMs, 0);
+  if (seen <= 0) return 0.5;                        // unknown age: neither fresh nor stale
+  const now = num(nowMs, Date.now());
+  const halfLife = nonNegative(halfLifeMs, 30 * 24 * 3600 * 1000);
+  if (halfLife <= 0) return 1;
+  const age = Math.max(0, now - seen);
+  return unit(Math.pow(0.5, age / halfLife), 0.5);
 }
 
 /**
@@ -71,16 +103,17 @@ export function expandByBfs(
   neighborsOf: (id: string) => readonly { id: string; weight?: number }[],
   options: { depth?: number; hopDecay?: number; limit?: number } = {},
 ): Map<string, { score: number; hop: number; via: string | null }> {
-  const depth = options.depth ?? 2;
-  const hopDecay = options.hopDecay ?? 0.5;
-  const limit = options.limit ?? 500;
+  const depth = Math.min(64, Math.floor(nonNegative(options.depth, 2)));
+  const hopDecay = unit(options.hopDecay, 0.5);
+  const limit = Math.floor(nonNegative(options.limit, 500)) || 500;
   const visited = new Map<string, { score: number; hop: number; via: string | null }>();
   let frontier: { id: string; score: number; hop: number; via: string | null }[] = [];
   for (const [id, score] of seeds) {
     if (visited.has(id)) continue;
-    const entry = { score, hop: 0, via: null };
+    const seedScore = nonNegative(score, 0);
+    const entry = { score: seedScore, hop: 0, via: null };
     visited.set(id, entry);
-    frontier.push({ id, score, hop: 0, via: null });
+    frontier.push({ id, score: seedScore, hop: 0, via: null });
   }
   while (frontier.length > 0 && visited.size < limit) {
     const next: typeof frontier = [];
@@ -88,8 +121,11 @@ export function expandByBfs(
       if (node.hop >= depth) continue;
       for (const edge of neighborsOf(node.id)) {
         if (edge?.id === undefined) continue;
-        const weight = Number.isFinite(edge.weight) ? Number(edge.weight) : 1;
-        const score = node.score * hopDecay * weight;
+        const weight = nonNegative(edge.weight, 1);
+        const raw = node.score * hopDecay * weight;
+        // Overflow (huge weights over several hops) would store Infinity and poison every
+        // downstream comparison: cap instead of letting it escape.
+        const score = Number.isFinite(raw) ? raw : Number.MAX_VALUE;
         const current = visited.get(edge.id);
         if (current !== undefined && current.score >= score) continue;
         const entry = { score, hop: node.hop + 1, via: node.id };
@@ -108,9 +144,9 @@ export function pageRank(
   outEdges: (id: string) => readonly { id: string; weight?: number }[],
   options: { damping?: number; iterations?: number; tolerance?: number } = {},
 ): Map<string, number> {
-  const damping = options.damping ?? 0.85;
-  const iterations = options.iterations ?? 30;
-  const tolerance = options.tolerance ?? 1e-6;
+  const damping = unit(options.damping, 0.85);
+  const iterations = Math.min(1000, Math.floor(nonNegative(options.iterations, 30))) || 30;
+  const tolerance = nonNegative(options.tolerance, 1e-6);
   const n = ids.length;
   const rank = new Map<string, number>();
   if (n === 0) return rank;
@@ -121,11 +157,11 @@ export function pageRank(
     let dangling = 0;
     for (const id of ids) {
       const outs = outEdges(id).filter((e) => e?.id !== undefined && ids.includes(e.id));
-      const total = outs.reduce((sum, e) => sum + (Number.isFinite(e.weight) ? Number(e.weight) : 1), 0);
+      const total = outs.reduce((sum, e) => sum + nonNegative(e.weight, 1), 0);
       const share = rank.get(id) ?? 0;
       if (total <= 0) { dangling += share; continue; }
       for (const edge of outs) {
-        const weight = Number.isFinite(edge.weight) ? Number(edge.weight) : 1;
+        const weight = nonNegative(edge.weight, 1);
         next.set(edge.id, (next.get(edge.id) ?? 0) + damping * share * (weight / total));
       }
     }
@@ -155,11 +191,13 @@ export function rankAcrossSources(
   } = {},
 ): { id: string; score: number; sources: number[]; confidence: number; recency: number; consensus: number }[] {
   const fused = reciprocalRankFusion(candidatesBySource, { k: options.k ?? 60 });
-  const now = options.now ?? Date.now();
+  const now = num(options.now, Date.now());
+  const halfLife = options.halfLifeMs ?? 30 * 24 * 3600 * 1000;
+  const prior = options.prior ?? 0.5;
   const rows = [...fused.entries()].map(([id, entry]) => {
-    const mentions = options.mentionsOf?.(id) ?? 0;
-    const confidence = betaConfidence(mentions, options.prior ?? 0.5);
-    const recency = recencyDecay(options.lastSeenOf?.(id) ?? 0, now, options.halfLifeMs ?? 30 * 24 * 3600 * 1000);
+    const mentions = nonNegative(options.mentionsOf?.(id) ?? 0, 0);
+    const confidence = betaConfidence(mentions, prior);
+    const recency = recencyDecay(options.lastSeenOf?.(id) ?? 0, now, halfLife);
     const consensus = consensusBoost(new Set(entry.sources).size);
     return { id, score: entry.score * consensus * confidence * recency, sources: [...new Set(entry.sources)], confidence, recency, consensus };
   });

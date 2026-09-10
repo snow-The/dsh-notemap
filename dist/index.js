@@ -1020,18 +1020,36 @@ import { join as join3 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 
 // src/relations.ts
+function num(value, fallback) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+function nonNegative(value, fallback) {
+  return Math.max(0, num(value, fallback));
+}
+function unit(value, fallback) {
+  return Math.min(1, Math.max(0, num(value, fallback)));
+}
 function consensusBoost(sourceCount) {
-  return 1 + Math.log(1 + Math.max(0, sourceCount));
+  return 1 + Math.log(1 + nonNegative(sourceCount, 0));
 }
 function betaConfidence(samples, prior = 0.5, weight = 100) {
-  if (!Number.isFinite(samples) || samples <= 0) return prior;
-  return (prior * weight + samples) / (weight + samples);
+  const p = unit(prior, 0.5);
+  const CAP = 1e12;
+  const w = Math.min(CAP, nonNegative(weight, 100));
+  const s = Math.min(CAP, nonNegative(samples, 0));
+  if (s <= 0) return p;
+  if (w <= 0) return p;
+  return unit((p * w + s) / (w + s), p);
 }
 function recencyDecay(lastSeenMs, nowMs = Date.now(), halfLifeMs = 30 * 24 * 3600 * 1e3) {
-  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) return 0.5;
-  const age = Math.max(0, nowMs - lastSeenMs);
-  if (!Number.isFinite(halfLifeMs) || halfLifeMs <= 0) return 1;
-  return Math.pow(0.5, age / halfLifeMs);
+  const seen = num(lastSeenMs, 0);
+  if (seen <= 0) return 0.5;
+  const now = num(nowMs, Date.now());
+  const halfLife = nonNegative(halfLifeMs, 30 * 24 * 3600 * 1e3);
+  if (halfLife <= 0) return 1;
+  const age = Math.max(0, now - seen);
+  return unit(Math.pow(0.5, age / halfLife), 0.5);
 }
 
 // src/network.ts
@@ -1494,7 +1512,7 @@ async function importSessions(opts) {
   const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
   const root = opts?.sessionsDir ?? join4(homedir3(), ".dsh", "sessions");
   const files = [];
-  const best = /* @__PURE__ */ new Map();
+  const byDir = /* @__PURE__ */ new Map();
   const walk = (dir) => {
     let entries = [];
     try {
@@ -1509,17 +1527,31 @@ async function importSessions(opts) {
           walk(p);
           continue;
         }
+        if (!name2.endsWith(".zstd") || name2.includes(".bak-")) continue;
         const m = /^session(?:\.v(\d+))?\.jsonl\.zstd$/.exec(name2);
-        if (m === null) continue;
-        const v = m[1] === void 0 ? 0 : Number(m[1]);
-        const prev = best.get(dir);
-        if (prev === void 0 || v > prev.v) best.set(dir, { v, path: p });
+        const list = byDir.get(dir) ?? [];
+        list.push({
+          path: p,
+          generation: m === null ? -1 : m[1] === void 0 ? 0 : Number(m[1]),
+          dshNamed: m !== null,
+          mtime: statSync(p).mtimeMs
+        });
+        byDir.set(dir, list);
       } catch {
       }
     }
   };
   walk(root);
-  for (const entry of best.values()) files.push(entry.path);
+  for (const list of byDir.values()) {
+    const named = list.filter((c) => c.dshNamed);
+    if (named.length > 0) {
+      named.sort((a, b) => b.generation - a.generation);
+      files.push(named[0].path);
+      continue;
+    }
+    list.sort((a, b) => b.mtime - a.mtime);
+    files.push(list[0].path);
+  }
   const limit = opts?.limit ?? 30;
   const maxLines = opts?.maxLines ?? 2e3;
   const force = opts?.force ?? false;
