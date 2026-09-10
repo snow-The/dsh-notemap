@@ -1476,7 +1476,11 @@ var defineTool = (o) => {
       parameters[k] = { ...v, ...required.has(k) ? { required: true } : {} };
     }
   }
-  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: "json" }, render: () => [] } });
+  return dshDefineTool({
+    ...o,
+    parameters,
+    output: o.output ?? { schema: { type: "object", additionalProperties: true }, render: () => [] }
+  });
 };
 var name = "dsh-notemap";
 var inject = ["tools"];

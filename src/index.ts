@@ -11,7 +11,15 @@ const defineTool = (o: any) => {
       parameters[k] = { ...(v as any), ...(required.has(k) ? { required: true } : {}) };
     }
   }
-  return dshDefineTool({ ...o, parameters, output: o.output ?? { schema: { type: 'json' }, render: () => [] } });
+  // The host VALIDATES tool schemas and aborts the whole plugin tree when one is invalid:
+  //   - `type` must be one of object/array/string/number/integer/boolean/null (`json` is not)
+  //   - an `object` schema must state `additionalProperties` explicitly
+  // `output` itself cannot be omitted either - the host reads `output.render`.
+  return dshDefineTool({
+    ...o,
+    parameters,
+    output: o.output ?? { schema: { type: 'object', additionalProperties: true }, render: () => [] },
+  });
 };
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
