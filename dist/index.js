@@ -906,6 +906,9 @@ function dshHome() {
 function acpGraphPath() {
   return join2(dshHome(), "graph", "graph.db");
 }
+function warn(what, err) {
+  console.warn("[dsh-notemap] " + what + ":", err instanceof Error ? err.message : String(err));
+}
 function acpGraphAvailable() {
   try {
     if (!existsSync(acpGraphPath())) return false;
@@ -916,7 +919,8 @@ function acpGraphAvailable() {
     } finally {
       db.close();
     }
-  } catch {
+  } catch (err) {
+    warn("ACP graph probe failed", err);
     return false;
   }
 }
@@ -977,7 +981,8 @@ function acpGraphRecall(query, limit = 5) {
           const cps = db.prepare("SELECT c.summary, c.seq_start FROM checkpoints c JOIN checkpoint_nodes cn ON cn.session_id=c.session_id AND cn.seq_start=c.seq_start WHERE cn.node_id=? ORDER BY c.created_at DESC LIMIT 1").all(r.id);
           if (cps.length) out.push({ node: r.id, summary: cps[0].summary, score: 1 });
         }
-      } catch {
+      } catch (err) {
+        warn("entity FTS query failed (cross-session hits lost)", err);
       }
       try {
         const cps = db.prepare("SELECT session_id, seq_start, summary FROM cp_fts WHERE cp_fts MATCH ? LIMIT ?").all(matchQ, limit);
@@ -986,7 +991,8 @@ function acpGraphRecall(query, limit = 5) {
             out.push({ node: "cp:" + c.session_id + ":" + c.seq_start, summary: c.summary, score: 0.8 });
           }
         }
-      } catch {
+      } catch (err) {
+        warn("checkpoint FTS query failed (cross-session hits lost)", err);
       }
       const seen = /* @__PURE__ */ new Set();
       const dedup = [];
@@ -1001,7 +1007,8 @@ function acpGraphRecall(query, limit = 5) {
     } finally {
       db.close();
     }
-  } catch {
+  } catch (err) {
+    warn("ACP recall failed", err);
     return [];
   }
 }
@@ -1035,18 +1042,23 @@ function acpGraphPath2() {
 function memoryDbPath() {
   return join3(dshHome2(), "memory", "memory.db");
 }
+function warn2(what, err) {
+  console.warn("[dsh-notemap] " + what + ":", err instanceof Error ? err.message : String(err));
+}
 function openReadOnly(path) {
   try {
     if (!existsSync2(path)) return null;
     return new DatabaseSync3(path, { readOnly: true });
-  } catch {
+  } catch (err) {
+    warn2("cannot open " + path + " read-only", err);
     return null;
   }
 }
 function tableExists(db, table) {
   try {
     return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(table) !== void 0;
-  } catch {
+  } catch (err) {
+    warn2("schema probe failed for table " + table, err);
     return false;
   }
 }
@@ -1078,7 +1090,8 @@ function buildNetwork(options = {}) {
     agents: { main: 0, subagent: 0 },
     acp_available: false,
     memory_available: false,
-    truncated_edges: false
+    truncated_edges: false,
+    dropped_edges: 0
   };
   const nodeRows = [];
   const edgeRows = [];
@@ -1266,7 +1279,10 @@ function buildNetwork(options = {}) {
     stats.memory_links = links;
   }
   const nodes = options.entities === false ? nodeRows.filter((n) => n.id.startsWith("mem:")) : nodeRows;
-  const edges = options.entities === false ? edgeRows.filter((e) => e.source.startsWith("mem:")) : edgeRows;
+  const allEdges = options.entities === false ? edgeRows.filter((e) => e.source.startsWith("mem:")) : edgeRows;
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const edges = allEdges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
+  stats.dropped_edges = allEdges.length - edges.length;
   const storeAny = store2;
   if (typeof storeAny.upsertNodesBatch === "function") storeAny.upsertNodesBatch(nodes);
   else for (const n of nodes) store2.addNode(n);
@@ -1302,7 +1318,8 @@ function agentTree() {
       byId.get(entry.parent)?.children.push(entry.session_id);
     }
     return [...byId.values()].sort((a, b) => b.entities - a.entities);
-  } catch {
+  } catch (err) {
+    warn2("agentTree query failed", err);
     return [];
   } finally {
     try {
@@ -1371,7 +1388,8 @@ function consensusRecall(query, options = {}) {
     });
     const minSources = options.minSources ?? 0;
     return results.filter((r) => r.sources >= minSources).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, options.limit ?? 15);
-  } catch {
+  } catch (err) {
+    warn2("consensus recall failed", err);
     return [];
   } finally {
     try {

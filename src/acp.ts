@@ -24,6 +24,15 @@ function acpGraphPath(): string {
   return join(dshHome(), 'graph', 'graph.db');
 }
 
+/**
+ * A fallback keeps working when the ACP graph is unavailable (by design), but it must
+ * never be indistinguishable from "the graph is simply empty" - that is how a silent
+ * week-long outage happened elsewhere in this stack. Only the error path logs.
+ */
+function warn(what: string, err: unknown): void {
+  console.warn('[dsh-notemap] ' + what + ':', err instanceof Error ? err.message : String(err));
+}
+
 /** ACP 图可用性探测：graph.db 存在 且 checkpoints 表非空。 */
 export function acpGraphAvailable(): boolean {
   try {
@@ -33,7 +42,7 @@ export function acpGraphAvailable(): boolean {
       const row = db.prepare('SELECT COUNT(*) AS c FROM checkpoints').get() as { c: number };
       return (row?.c ?? 0) > 0;
     } finally { db.close(); }
-  } catch { return false; }
+  } catch (err) { warn('ACP graph probe failed', err); return false; }
 }
 
 /** 从 ACP 图批量导入到 notemap GraphStore。返回导入统计。 */
@@ -104,7 +113,7 @@ export function acpGraphRecall(query: string, limit = 5): { node: string; summar
           const cps = db.prepare('SELECT c.summary, c.seq_start FROM checkpoints c JOIN checkpoint_nodes cn ON cn.session_id=c.session_id AND cn.seq_start=c.seq_start WHERE cn.node_id=? ORDER BY c.created_at DESC LIMIT 1').all(r.id) as { summary: string; seq_start: number }[];
           if (cps.length) out.push({ node: r.id, summary: cps[0].summary, score: 1 });
         }
-      } catch { /* FTS */ }
+      } catch (err) { warn('entity FTS query failed (cross-session hits lost)', err); }
       // 2) checkpoint 摘要 FTS 命中
       try {
         const cps = db.prepare('SELECT session_id, seq_start, summary FROM cp_fts WHERE cp_fts MATCH ? LIMIT ?').all(matchQ, limit) as { session_id: string; seq_start: number; summary: string }[];
@@ -113,12 +122,12 @@ export function acpGraphRecall(query: string, limit = 5): { node: string; summar
             out.push({ node: 'cp:' + c.session_id + ':' + c.seq_start, summary: c.summary, score: 0.8 });
           }
         }
-      } catch { /* FTS */ }
+      } catch (err) { warn('checkpoint FTS query failed (cross-session hits lost)', err); }
       // 去重 + 截断
       const seen = new Set<string>();
       const dedup: { node: string; summary: string; score: number }[] = [];
       for (const o of out) { const key = o.node; if (!seen.has(key)) { seen.add(key); dedup.push(o); } }
       return dedup.slice(0, limit);
     } finally { db.close(); }
-  } catch { return []; }
+  } catch (err) { warn('ACP recall failed', err); return []; }
 }

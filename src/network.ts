@@ -29,14 +29,19 @@ export function dshHome(): string {
 export function acpGraphPath(): string { return join(dshHome(), 'graph', 'graph.db'); }
 export function memoryDbPath(): string { return join(dshHome(), 'memory', 'memory.db'); }
 
+/** Only the error path logs: an empty network must never look like a missing graph. */
+function warn(what: string, err: unknown): void {
+  console.warn('[dsh-notemap] ' + what + ':', err instanceof Error ? err.message : String(err));
+}
+
 function openReadOnly(path: string): DatabaseSync | null {
   try {
-    if (!existsSync(path)) return null;
+    if (!existsSync(path)) return null;                 // absent by design, not an error
     return new DatabaseSync(path, { readOnly: true });
-  } catch { return null; }
+  } catch (err) { warn('cannot open ' + path + ' read-only', err); return null; }
 }
 function tableExists(db: DatabaseSync, table: string): boolean {
-  try { return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(table) !== undefined; } catch { return false; }
+  try { return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(table) !== undefined; } catch (err) { warn('schema probe failed for table ' + table, err); return false; }
 }
 function columnsOf(db: DatabaseSync, table: string): Set<string> {
   try { return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((r) => r.name)); } catch { return new Set(); }
@@ -297,7 +302,7 @@ export function agentTree(): {
       byId.get(entry.parent)?.children.push(entry.session_id);
     }
     return [...byId.values()].sort((a, b) => b.entities - a.entities);
-  } catch { return []; } finally { try { acp.close(); } catch { /* */ } }
+  } catch (err) { warn('agentTree query failed', err); return []; } finally { try { acp.close(); } catch { /* close is best effort */ } }
 }
 
 /**
@@ -365,5 +370,5 @@ export function consensusRecall(query: string, options: { limit?: number; k?: nu
       .filter((r) => r.sources >= minSources)
       .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
       .slice(0, options.limit ?? 15);
-  } catch { return []; } finally { try { acp.close(); } catch { /* */ } }
+  } catch (err) { warn('consensus recall failed', err); return []; } finally { try { acp.close(); } catch { /* close is best effort */ } }
 }
