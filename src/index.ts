@@ -74,18 +74,28 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
 
   const root = opts?.sessionsDir ?? join(homedir(), '.dsh', 'sessions');
   const files: string[] = [];
+  // One session = one directory. DSH migrates a log to a new generation
+  // (session.v<N>.jsonl.zstd) and keeps the old file beside it, so collecting every
+  // *.zstd imported each migrated session TWICE (once per generation). Take the
+  // highest generation per directory; backups never match the pattern.
+  const best = new Map<string, { v: number; path: string }>();
   const walk = (dir: string) => {
     let entries: string[] = [];
     try { entries = readdirSync(dir, { withFileTypes: true }).map((d) => d.name); } catch { return; }
     for (const name of entries) {
       const p = join(dir, name);
       try {
-        if (statSync(p).isDirectory()) walk(p);
-        else if (name.endsWith('.zstd')) files.push(p);
+        if (statSync(p).isDirectory()) { walk(p); continue; }
+        const m = /^session(?:\.v(\d+))?\.jsonl\.zstd$/.exec(name);
+        if (m === null) continue;
+        const v = m[1] === undefined ? 0 : Number(m[1]);
+        const prev = best.get(dir);
+        if (prev === undefined || v > prev.v) best.set(dir, { v, path: p });
       } catch { /* skip */ }
     }
   };
   walk(root);
+  for (const entry of best.values()) files.push(entry.path);
 
   const limit = opts?.limit ?? 30;
   const maxLines = opts?.maxLines ?? 2000;

@@ -1053,6 +1053,7 @@ async function importSessions(opts) {
   const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
   const root = opts?.sessionsDir ?? join3(homedir2(), ".dsh", "sessions");
   const files = [];
+  const best = /* @__PURE__ */ new Map();
   const walk = (dir) => {
     let entries = [];
     try {
@@ -1063,13 +1064,21 @@ async function importSessions(opts) {
     for (const name2 of entries) {
       const p = join3(dir, name2);
       try {
-        if (statSync(p).isDirectory()) walk(p);
-        else if (name2.endsWith(".zstd")) files.push(p);
+        if (statSync(p).isDirectory()) {
+          walk(p);
+          continue;
+        }
+        const m = /^session(?:\.v(\d+))?\.jsonl\.zstd$/.exec(name2);
+        if (m === null) continue;
+        const v = m[1] === void 0 ? 0 : Number(m[1]);
+        const prev = best.get(dir);
+        if (prev === void 0 || v > prev.v) best.set(dir, { v, path: p });
       } catch {
       }
     }
   };
   walk(root);
+  for (const entry of best.values()) files.push(entry.path);
   const limit = opts?.limit ?? 30;
   const maxLines = opts?.maxLines ?? 2e3;
   const force = opts?.force ?? false;
