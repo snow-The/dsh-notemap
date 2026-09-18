@@ -12,8 +12,15 @@
   distinct from "asked for an empty string" (`{prefix: ''}` still returns [])
 - fix(labels): the match is a SUBSTRING (`LIKE '%q%'`) and never was a prefix — the tool description
   and the parameter description now say so (the parameter NAME stays `prefix`, to avoid breaking callers)
-- test: 23/23 (relations + verify suites); bundle captured through a fake ctx shows 27 tools —
-  9 array schemas, 18 object, 0 undeclared
+- test: `test/tools.test.mjs` — conformance over the TOOL BOUNDARY (the registered definition vs the
+  value it actually returns). All four reported bugs lived in that seam and were invisible to
+  GraphStore-level tests, which is why the suite seeds a NON-EMPTY graph (an empty array validates
+  against every items schema and proves nothing), checks declared type AND items.type, and fails if
+  no item-level check ever ran. Mutation-tested against all three original defects — `searchLabels`
+  back to string[], the default call back to the empty query, one tool back to the shim default
+  output — it fails on each and passes again once they are restored
+- test: 30/30 (relations + verify + tool conformance suites); bundle captured through a fake ctx
+  shows 27 tools — 9 array schemas, 18 object, 0 undeclared
 
 ## 0.11.1
 - fix: notemap_filter schema missing additionalProperties -> dsh-tools UNSUPPORTED_SCHEMA crash on plugin load
