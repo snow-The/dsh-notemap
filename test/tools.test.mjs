@@ -5,6 +5,7 @@
 //   1. an undeclared `output` was defaulted to {type:'object'} while the handler returned an array
 //   2. one tool returned two shapes from two branches, and one schema cannot describe both
 //   3. the no-argument call answered [] — a perfectly valid array, and a wrong answer
+//   4. an unresolved seed returned the same value as a resolved node with no neighbours
 // A test that only imports src/graph.ts never sees either half of that seam.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -141,6 +142,22 @@ test('both labels modes return the same record shape', async () => {
 
 test('a pathless pair is an empty array, never null', async () => {
   assert.deepEqual(await tools.get('notemap_paths').execute({ from: 'no-a', to: 'no-b' }, {}), []);
+});
+
+test('an unresolved seed is REPORTED, not returned as a valid empty subgraph', async () => {
+  // The last silent-empty answer in the plugin. 'seed' is an id, but notemap_search matches TITLES,
+  // so a caller can very reasonably pass one back - and got { nodes: [], edges: [] }, which is also
+  // the correct answer for a real node with no neighbours. Two different facts, one output.
+  const byTitle = await tools.get('notemap_context').execute({ seed: 'zig compiler notes', maxDepth: 1 }, {});
+  assert.equal(byTitle.seedFound, false, 'a title is not an id, and the caller must be able to see that');
+  assert.deepEqual(byTitle.nodes, [], 'and it still returns a well-formed empty subgraph');
+
+  const real = await tools.get('notemap_context').execute({ seed: 'zig-1', maxDepth: 1 }, {});
+  assert.equal(real.seedFound, true);
+  assert.ok(real.nodes.length >= 3, 'zig-1 reaches r32-1 and misc-1 within one hop');
+
+  // The distinction is the whole fix, so assert it as one:
+  assert.notEqual(byTitle.seedFound, real.seedFound);
 });
 
 after(() => {

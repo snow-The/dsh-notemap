@@ -891,13 +891,31 @@ export class GraphStore {
   }
 
   // ---------- subgraph extraction (LightRAG get_knowledge_graph) ----------
-  subgraph(seed: string, maxDepth = 2, maxNodes = 50): { nodes: NodeRecord[]; edges: EdgeRecord[] } {
+  /**
+   * The subgraph around one seed, with {@link seedFound} saying whether the seed resolved.
+   *
+   * An unresolved seed used to be indistinguishable from a resolved one with no neighbours: both
+   * returned `{ nodes: [], edges: [] }`. `seed` is an ID, and a caller who passes a TITLE — which
+   * `notemap_search` will happily hand back, since it matches titles — got a confident empty answer
+   * with nothing in it to say the lookup had failed. Both results are legitimate; only one of them
+   * answers the question that was asked, and before this flag the caller could not tell which.
+   *
+   * A flag rather than an `error`: an unknown seed is a valid answer to "what is around this node",
+   * not a failure, and reusing the error channel for it would make every caller's error handling
+   * wrong in the same direction.
+   */
+  subgraph(seed: string, maxDepth = 2, maxNodes = 50): { nodes: NodeRecord[]; edges: EdgeRecord[]; seedFound: boolean } {
     const visited = new Set<string>([seed]);
     const queue: [string, number][] = [[seed, 0]];
     const edgeKeys = new Set<string>();
     const nodeList: NodeRecord[] = [];
     const edgeList: EdgeRecord[] = [];
     const seedNode = this.getNode(seed);
+    // AGAINST null, not undefined. getNode's contract is `NodeRecord | null`, so comparing with
+    // undefined makes this `true` for every seed - a no-op that reads exactly like the fix. Written
+    // that way first, and the test below caught it: subgraph('zig compiler notes') reported
+    // seedFound while getNode('zig compiler notes') returned null.
+    const seedFound = seedNode !== null;
     if (seedNode) nodeList.push(seedNode);
     while (queue.length > 0 && nodeList.length < maxNodes) {
       const [cur, depth] = queue.shift()!;
@@ -914,7 +932,7 @@ export class GraphStore {
         }
       }
     }
-    return { nodes: nodeList, edges: edgeList };
+    return { nodes: nodeList, edges: edgeList, seedFound };
   }
 
   // ---------- labels (LightRAG search_labels / get_popular_labels) ----------

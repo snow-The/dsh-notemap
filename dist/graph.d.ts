@@ -223,9 +223,23 @@ export declare class GraphStore {
         confidence?: number;
         meta?: Record<string, unknown>;
     }[]): number;
+    /**
+     * The subgraph around one seed, with {@link seedFound} saying whether the seed resolved.
+     *
+     * An unresolved seed used to be indistinguishable from a resolved one with no neighbours: both
+     * returned `{ nodes: [], edges: [] }`. `seed` is an ID, and a caller who passes a TITLE — which
+     * `notemap_search` will happily hand back, since it matches titles — got a confident empty answer
+     * with nothing in it to say the lookup had failed. Both results are legitimate; only one of them
+     * answers the question that was asked, and before this flag the caller could not tell which.
+     *
+     * A flag rather than an `error`: an unknown seed is a valid answer to "what is around this node",
+     * not a failure, and reusing the error channel for it would make every caller's error handling
+     * wrong in the same direction.
+     */
     subgraph(seed: string, maxDepth?: number, maxNodes?: number): {
         nodes: NodeRecord[];
         edges: EdgeRecord[];
+        seedFound: boolean;
     };
     /**
      * Substring match over titles, in the SAME shape as {@link popularLabels}.

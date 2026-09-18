@@ -83,6 +83,7 @@ export declare function subgraphOf(args: {
 }): {
     nodes: NodeRecord[];
     edges: EdgeRecord[];
+    seedFound: boolean;
 };
 export declare function searchVector(args: {
     q: string;

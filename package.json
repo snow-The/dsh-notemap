@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-notemap",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Shared knowledge graph for DeepSeek Harness: notes with quantified relations (weights/confidence), graph algorithms (BFS/Dijkstra/centrality/common-neighbors/PageRank), DuckLake-inspired snapshots, and a cross-session/cross-agent fusion index. Headless: agents query the graph, no canvas UI.",
   "type": "module",
   "main": "./dist/index.js",

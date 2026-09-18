@@ -1,4 +1,16 @@
 
+## 0.12.1
+- fix(context): `notemap_context` now returns `seedFound`. An unresolved seed used to be
+  indistinguishable from a resolved one with no neighbours — both returned `{ nodes: [], edges: [] }`
+  — and `notemap_search` matches TITLES, so a caller that passed a title back got a confident empty
+  answer with nothing in it to say the lookup had failed. It is a flag and not an `error` because an
+  unknown seed is a legitimate answer to "what is around this node", not a failure; overloading the
+  error channel would make every caller's handling wrong in the same direction
+- test: a case for it in the conformance suite, which CAUGHT THE FIX BEING A NO-OP — `getNode`'s
+  contract is `NodeRecord | null`, the first version compared against `undefined`, and
+  `null !== undefined` is true for every seed. The assertion
+  `subgraph('zig compiler notes').seedFound === false` failed against a change that read exactly
+  like the fix. 31/31
 ## 0.12.0
 - fix(tools): nine read tools (`notemap_search` `recall` `labels` `fusion` `neighbors` `related` `paths` `common` `filter`) returned ARRAYS while the local `defineTool` shim defaulted an undeclared `output` to `type: object`, so the host rejected every call with `"value" must be an object` — the whole read surface of the graph was unreachable while the data stayed intact behind `notemap_export`. Each of the nine now declares its own output (`arrayOut` for record arrays, `stringArrayOut` for id/label arrays), and `findPaths` returns `[]` instead of `null` so the declared array shape always holds
 - fix(labels): one shape for both modes — `searchLabels` returned bare strings while `popularLabels`

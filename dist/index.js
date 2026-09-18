@@ -759,6 +759,19 @@ var GraphStore = class {
     });
   }
   // ---------- subgraph extraction (LightRAG get_knowledge_graph) ----------
+  /**
+   * The subgraph around one seed, with {@link seedFound} saying whether the seed resolved.
+   *
+   * An unresolved seed used to be indistinguishable from a resolved one with no neighbours: both
+   * returned `{ nodes: [], edges: [] }`. `seed` is an ID, and a caller who passes a TITLE — which
+   * `notemap_search` will happily hand back, since it matches titles — got a confident empty answer
+   * with nothing in it to say the lookup had failed. Both results are legitimate; only one of them
+   * answers the question that was asked, and before this flag the caller could not tell which.
+   *
+   * A flag rather than an `error`: an unknown seed is a valid answer to "what is around this node",
+   * not a failure, and reusing the error channel for it would make every caller's error handling
+   * wrong in the same direction.
+   */
   subgraph(seed, maxDepth = 2, maxNodes = 50) {
     const visited = /* @__PURE__ */ new Set([seed]);
     const queue = [[seed, 0]];
@@ -766,6 +779,7 @@ var GraphStore = class {
     const nodeList = [];
     const edgeList = [];
     const seedNode = this.getNode(seed);
+    const seedFound = seedNode !== null;
     if (seedNode) nodeList.push(seedNode);
     while (queue.length > 0 && nodeList.length < maxNodes) {
       const [cur, depth] = queue.shift();
@@ -785,7 +799,7 @@ var GraphStore = class {
         }
       }
     }
-    return { nodes: nodeList, edges: edgeList };
+    return { nodes: nodeList, edges: edgeList, seedFound };
   }
   // ---------- labels (LightRAG search_labels / get_popular_labels) ----------
   /**
@@ -1726,11 +1740,11 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_context",
-    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning.",
+    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours.",
     parameters: {
       type: "object",
       properties: {
-        seed: { type: "string", description: "Seed node id" },
+        seed: { type: "string", description: "Seed node ID (not a title \u2014 an unknown id returns seedFound: false)" },
         maxDepth: { type: "number", description: "Max hop depth (default 2)" },
         maxNodes: { type: "number", description: "Max nodes to collect (default 50)" }
       },

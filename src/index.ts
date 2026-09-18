@@ -290,11 +290,11 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_context',
-    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning.',
+    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours.',
     parameters: {
       type: 'object',
       properties: {
-        seed: { type: 'string', description: 'Seed node id' },
+        seed: { type: 'string', description: 'Seed node ID (not a title — an unknown id returns seedFound: false)' },
         maxDepth: { type: 'number', description: 'Max hop depth (default 2)' },
         maxNodes: { type: 'number', description: 'Max nodes to collect (default 50)' },
       },
