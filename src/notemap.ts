@@ -48,8 +48,10 @@ export function searchWithContext(args: { q: string; limit?: number }) {
   return getStore().searchWithContext(args.q, args.limit ?? 10);
 }
 
-export function findPaths(args: { from: string; to: string }): string[] | null {
-  return getStore().shortestPath(args.from, args.to);
+export function findPaths(args: { from: string; to: string }): string[] {
+  // Never `null`: the declared output schema is one array shape, and the host validates the
+  // returned value against it, so "no path" must be an empty array rather than a second type.
+  return getStore().shortestPath(args.from, args.to) ?? [];
 }
 
 export function findRelated(args: { id: string; limit?: number }): { node: NodeRecord; score: number }[] {

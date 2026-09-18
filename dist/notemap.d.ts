@@ -46,7 +46,7 @@ export declare function searchWithContext(args: {
 export declare function findPaths(args: {
     from: string;
     to: string;
-}): string[] | null;
+}): string[];
 export declare function findRelated(args: {
     id: string;
     limit?: number;

@@ -21,6 +21,21 @@ const defineTool = (o: any) => {
     output: o.output ?? { schema: { type: 'object', additionalProperties: true }, render: () => [] },
   });
 };
+
+/**
+ * Output contract for tools whose handler returns an ARRAY.
+ *
+ * The shim above defaults an undeclared `output` to `{ type: 'object' }`, so every array-returning
+ * handler failed the host's output validation with `"value" must be an object` — nine tools in all:
+ * search, recall, labels, fusion, neighbors, related, paths, common, filter. Arrays are legal in
+ * this host (built-in `job_list` returns one); they must simply be DECLARED. Two item shapes exist
+ * here: record arrays and plain string arrays (ids/labels).
+ */
+const arrayOut = (items: Record<string, unknown> = { type: 'object', additionalProperties: true }) => ({
+  schema: { type: 'array', items },
+  render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) }],
+});
+const stringArrayOut = arrayOut({ type: 'string' });
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
@@ -299,6 +314,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
         limit: { type: 'number', description: 'Max results (default 20)' },
       },
     },
+    output: arrayOut(),
     execute: (args: { prefix?: string; popular?: boolean; limit?: number }) => labelsOf(args),
   }));
 
@@ -368,6 +384,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['q'],
     },
+    output: arrayOut(),
     execute: (args: { q: string; limit?: number }) => searchNotes(args),
   }));
 
@@ -382,6 +399,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['from', 'to'],
     },
+    output: stringArrayOut,
     execute: (args: { from: string; to: string }) => findPaths(args),
   }));
 
@@ -396,6 +414,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['id'],
     },
+    output: arrayOut(),
     execute: (args: { id: string; limit?: number }) => findRelated(args),
   }));
 
@@ -450,6 +469,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['id'],
     },
+    output: arrayOut(),
     execute: (args: { id: string; dir?: 'out' | 'in' | 'both'; limit?: number }) => neighborsOf(args),
   }));
 
@@ -461,6 +481,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       properties: { a: { type: 'string' }, b: { type: 'string' } },
       required: ['a', 'b'],
     },
+    output: stringArrayOut,
     execute: (args: { a: string; b: string }) => commonNeighbors(args),
   }));
 
@@ -490,6 +511,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['query'],
     },
+    output: arrayOut(),
     execute: (args: { query: string; limit?: number }) => {
       const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h: any) => ({
         id: h.node?.id,
@@ -543,6 +565,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['q'],
     },
+    output: arrayOut(),
     execute: (args: { q: string; limit?: number; maxDepth?: number; budget?: number }) => searchFusedOf(args),
   }));
 
@@ -557,6 +580,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['filter'],
     },
+    output: arrayOut(),
     execute: (args: { filter: Record<string, unknown>; limit?: number }) => filterNodesOf(args),
   }));
 

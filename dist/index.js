@@ -845,7 +845,7 @@ function searchWithContext(args) {
   return getStore().searchWithContext(args.q, args.limit ?? 10);
 }
 function findPaths(args) {
-  return getStore().shortestPath(args.from, args.to);
+  return getStore().shortestPath(args.from, args.to) ?? [];
 }
 function findRelated(args) {
   return getStore().related(args.id, args.limit ?? 10);
@@ -1486,6 +1486,11 @@ var defineTool = (o) => {
     output: o.output ?? { schema: { type: "object", additionalProperties: true }, render: () => [] }
   });
 };
+var arrayOut = (items = { type: "object", additionalProperties: true }) => ({
+  schema: { type: "array", items },
+  render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
+});
+var stringArrayOut = arrayOut({ type: "string" });
 var name = "dsh-notemap";
 var inject = ["tools"];
 var RT_CTX = "Current runtime context";
@@ -1727,6 +1732,7 @@ function apply(ctx) {
         limit: { type: "number", description: "Max results (default 20)" }
       }
     },
+    output: arrayOut(),
     execute: (args) => labelsOf(args)
   }));
   reg(defineTool({
@@ -1792,6 +1798,7 @@ function apply(ctx) {
       },
       required: ["q"]
     },
+    output: arrayOut(),
     execute: (args) => searchNotes(args)
   }));
   reg(defineTool({
@@ -1805,6 +1812,7 @@ function apply(ctx) {
       },
       required: ["from", "to"]
     },
+    output: stringArrayOut,
     execute: (args) => findPaths(args)
   }));
   reg(defineTool({
@@ -1818,6 +1826,7 @@ function apply(ctx) {
       },
       required: ["id"]
     },
+    output: arrayOut(),
     execute: (args) => findRelated(args)
   }));
   reg(defineTool({
@@ -1866,6 +1875,7 @@ function apply(ctx) {
       },
       required: ["id"]
     },
+    output: arrayOut(),
     execute: (args) => neighborsOf(args)
   }));
   reg(defineTool({
@@ -1876,6 +1886,7 @@ function apply(ctx) {
       properties: { a: { type: "string" }, b: { type: "string" } },
       required: ["a", "b"]
     },
+    output: stringArrayOut,
     execute: (args) => commonNeighbors(args)
   }));
   reg(defineTool({
@@ -1903,6 +1914,7 @@ function apply(ctx) {
       },
       required: ["query"]
     },
+    output: arrayOut(),
     execute: (args) => {
       const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h) => ({
         id: h.node?.id,
@@ -1955,6 +1967,7 @@ function apply(ctx) {
       },
       required: ["q"]
     },
+    output: arrayOut(),
     execute: (args) => searchFusedOf(args)
   }));
   reg(defineTool({
@@ -1968,6 +1981,7 @@ function apply(ctx) {
       },
       required: ["filter"]
     },
+    output: arrayOut(),
     execute: (args) => filterNodesOf(args)
   }));
   reg(defineTool({
