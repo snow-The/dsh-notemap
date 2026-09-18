@@ -103,9 +103,32 @@ export function embedAll(batchSize?: number): number {
   return getStore().embedAll(batchSize ?? 64);
 }
 
-export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: number }) {
-  if (args.popular) return getStore().popularLabels(args.limit ?? 20);
-  return getStore().searchLabels(args.prefix ?? '', args.limit ?? 20);
+/**
+ * One shape for both modes: `{title, degree}[]`.
+ *
+ * The no-argument call carries the tool's promise ("what does this graph know?"), so it answers
+ * with the degree ranking. It used to fall through to `searchLabels('')`, which returns [] by
+ * design — a confident "this graph knows nothing" on a 4,919-node graph, with nothing in the
+ * result to say otherwise. The empty guard is right; the DEFAULT was what had to move.
+ */
+/**
+ * Which mode a labels call means. Pure, so the DEFAULT is a tested decision and not a side effect
+ * of the argument parsing.
+ *
+ * No argument at all is the call that carries the tool's promise ("what does this graph know?"),
+ * so it answers with the degree ranking. It used to fall through to `searchLabels('')`, which
+ * returns [] by design — a confident "this graph knows nothing" on a 4,919-node graph, with
+ * nothing in the result to say otherwise. The empty guard is right; the default was wrong.
+ */
+export function labelsPlan(args: { prefix?: string; popular?: boolean }): 'popular' | 'substring' {
+  const askedNothing = args.prefix === undefined && args.popular === undefined;
+  return args.popular || askedNothing ? 'popular' : 'substring';
+}
+
+export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: number }): { title: string; degree: number }[] {
+  const limit = args.limit ?? 20;
+  if (labelsPlan(args) === 'popular') return getStore().popularLabels(limit);
+  return getStore().searchLabels(String(args.prefix ?? '').trim(), limit);
 }
 
 export function searchFusedOf(args: { q: string; limit?: number; maxDepth?: number; budget?: number }): { node: NodeRecord; score: number }[] {

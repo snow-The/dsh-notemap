@@ -305,12 +305,12 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_labels',
-    description: 'Search note titles (prefix/fuzzy) or list popular labels by degree. Quick way to discover what the graph knows.',
+    description: 'Search note titles by SUBSTRING (case-insensitive, matches anywhere in the title), or list the highest-degree labels. Called with no arguments it answers "what does this graph know?" with the degree ranking — an empty result then means an empty graph, not a missing filter.',
     parameters: {
       type: 'object',
       properties: {
-        prefix: { type: 'string', description: 'Title prefix/fragment to match' },
-        popular: { type: 'boolean', description: 'If true, return top labels by connection degree instead' },
+        prefix: { type: 'string', description: 'Title substring to match anywhere in the title (case-insensitive); omit it with popular to get the degree ranking' },
+        popular: { type: 'boolean', description: 'Return the highest-degree labels instead of substring matches (the default when no argument is given)' },
         limit: { type: 'number', description: 'Max results (default 20)' },
       },
     },

@@ -918,11 +918,24 @@ export class GraphStore {
   }
 
   // ---------- labels (LightRAG search_labels / get_popular_labels) ----------
-  searchLabels(prefix: string, limit = 20): string[] {
+  /**
+   * Substring match over titles, in the SAME shape as {@link popularLabels}.
+   *
+   * It used to return bare strings while popularLabels returned `{title, degree}` records: one
+   * tool, two output types. The declared schema can describe only one of them, so every non-empty
+   * prefix failed output validation (`"value[0]" must be an object`) while the popular branch
+   * passed. The match is a substring (`LIKE '%q%'`) — that is what the description now says. An
+   * empty query still returns [] instead of scanning the table; callers who want "everything" ask
+   * for the degree ranking, which is also what the tool's default call now does.
+   */
+  searchLabels(prefix: string, limit = 20): { title: string; degree: number }[] {
     const q = String(prefix).trim();
     if (!q) return [];
-    const rows = this.db.prepare('SELECT DISTINCT title FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ORDER BY title LIMIT ?').all('%' + q + '%', limit) as { title: string }[];
-    return rows.map(r => r.title);
+    const rows = this.db.prepare(
+      'SELECT n.title AS title, MAX(COALESCE(d.degree, 0)) AS degree FROM nodes n LEFT JOIN degree_cache d ON d.node_id = n.id '
+      + 'WHERE n.deleted_at IS NULL AND n.title LIKE ? GROUP BY n.title ORDER BY n.title LIMIT ?'
+    ).all('%' + q + '%', limit) as { title: string; degree: number }[];
+    return rows;
   }
 
   popularLabels(limit = 20): { title: string; degree: number }[] {

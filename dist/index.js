@@ -788,11 +788,23 @@ var GraphStore = class {
     return { nodes: nodeList, edges: edgeList };
   }
   // ---------- labels (LightRAG search_labels / get_popular_labels) ----------
+  /**
+   * Substring match over titles, in the SAME shape as {@link popularLabels}.
+   *
+   * It used to return bare strings while popularLabels returned `{title, degree}` records: one
+   * tool, two output types. The declared schema can describe only one of them, so every non-empty
+   * prefix failed output validation (`"value[0]" must be an object`) while the popular branch
+   * passed. The match is a substring (`LIKE '%q%'`) — that is what the description now says. An
+   * empty query still returns [] instead of scanning the table; callers who want "everything" ask
+   * for the degree ranking, which is also what the tool's default call now does.
+   */
   searchLabels(prefix, limit = 20) {
     const q = String(prefix).trim();
     if (!q) return [];
-    const rows = this.db.prepare("SELECT DISTINCT title FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ORDER BY title LIMIT ?").all("%" + q + "%", limit);
-    return rows.map((r) => r.title);
+    const rows = this.db.prepare(
+      "SELECT n.title AS title, MAX(COALESCE(d.degree, 0)) AS degree FROM nodes n LEFT JOIN degree_cache d ON d.node_id = n.id WHERE n.deleted_at IS NULL AND n.title LIKE ? GROUP BY n.title ORDER BY n.title LIMIT ?"
+    ).all("%" + q + "%", limit);
+    return rows;
   }
   popularLabels(limit = 20) {
     const rows = this.db.prepare(
@@ -884,9 +896,14 @@ function setProvider(provider) {
 function embedAll(batchSize) {
   return getStore().embedAll(batchSize ?? 64);
 }
+function labelsPlan(args) {
+  const askedNothing = args.prefix === void 0 && args.popular === void 0;
+  return args.popular || askedNothing ? "popular" : "substring";
+}
 function labelsOf(args) {
-  if (args.popular) return getStore().popularLabels(args.limit ?? 20);
-  return getStore().searchLabels(args.prefix ?? "", args.limit ?? 20);
+  const limit = args.limit ?? 20;
+  if (labelsPlan(args) === "popular") return getStore().popularLabels(limit);
+  return getStore().searchLabels(String(args.prefix ?? "").trim(), limit);
 }
 function searchFusedOf(args) {
   return getStore().searchFused(args.q, { limit: args.limit, maxDepth: args.maxDepth, budget: args.budget });
@@ -1723,12 +1740,12 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_labels",
-    description: "Search note titles (prefix/fuzzy) or list popular labels by degree. Quick way to discover what the graph knows.",
+    description: 'Search note titles by SUBSTRING (case-insensitive, matches anywhere in the title), or list the highest-degree labels. Called with no arguments it answers "what does this graph know?" with the degree ranking \u2014 an empty result then means an empty graph, not a missing filter.',
     parameters: {
       type: "object",
       properties: {
-        prefix: { type: "string", description: "Title prefix/fragment to match" },
-        popular: { type: "boolean", description: "If true, return top labels by connection degree instead" },
+        prefix: { type: "string", description: "Title substring to match anywhere in the title (case-insensitive); omit it with popular to get the degree ranking" },
+        popular: { type: "boolean", description: "Return the highest-degree labels instead of substring matches (the default when no argument is given)" },
         limit: { type: "number", description: "Max results (default 20)" }
       }
     },

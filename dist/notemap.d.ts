@@ -94,11 +94,32 @@ export declare function searchVector(args: {
 }[];
 export declare function setProvider(provider: import('./graph.ts').EmbeddingProvider | null): void;
 export declare function embedAll(batchSize?: number): number;
+/**
+ * One shape for both modes: `{title, degree}[]`.
+ *
+ * The no-argument call carries the tool's promise ("what does this graph know?"), so it answers
+ * with the degree ranking. It used to fall through to `searchLabels('')`, which returns [] by
+ * design — a confident "this graph knows nothing" on a 4,919-node graph, with nothing in the
+ * result to say otherwise. The empty guard is right; the DEFAULT was what had to move.
+ */
+/**
+ * Which mode a labels call means. Pure, so the DEFAULT is a tested decision and not a side effect
+ * of the argument parsing.
+ *
+ * No argument at all is the call that carries the tool's promise ("what does this graph know?"),
+ * so it answers with the degree ranking. It used to fall through to `searchLabels('')`, which
+ * returns [] by design — a confident "this graph knows nothing" on a 4,919-node graph, with
+ * nothing in the result to say otherwise. The empty guard is right; the default was wrong.
+ */
+export declare function labelsPlan(args: {
+    prefix?: string;
+    popular?: boolean;
+}): 'popular' | 'substring';
 export declare function labelsOf(args: {
     prefix?: string;
     popular?: boolean;
     limit?: number;
-}): string[] | {
+}): {
     title: string;
     degree: number;
 }[];

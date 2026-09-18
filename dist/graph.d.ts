@@ -227,7 +227,20 @@ export declare class GraphStore {
         nodes: NodeRecord[];
         edges: EdgeRecord[];
     };
-    searchLabels(prefix: string, limit?: number): string[];
+    /**
+     * Substring match over titles, in the SAME shape as {@link popularLabels}.
+     *
+     * It used to return bare strings while popularLabels returned `{title, degree}` records: one
+     * tool, two output types. The declared schema can describe only one of them, so every non-empty
+     * prefix failed output validation (`"value[0]" must be an object`) while the popular branch
+     * passed. The match is a substring (`LIKE '%q%'`) — that is what the description now says. An
+     * empty query still returns [] instead of scanning the table; callers who want "everything" ask
+     * for the degree ranking, which is also what the tool's default call now does.
+     */
+    searchLabels(prefix: string, limit?: number): {
+        title: string;
+        degree: number;
+    }[];
     popularLabels(limit?: number): {
         title: string;
         degree: number;

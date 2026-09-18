@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 import { GraphStore } from '../src/graph.ts';
+import { labelsPlan } from '../src/notemap.ts';
 
 function newStore() {
   const dir = mkdtempSync(join(tmpdir(), 'notemap-verify-'));
@@ -231,4 +232,42 @@ test('legacy: 迁移路径兼容(核心查询可用)', () => {
     assert.ok(s.stats().nodes >= 2);
     assert.equal(s.searchFused('兼容').length >= 1, true);
   } finally { closeStore(s, dir); }
+});
+// ---------- labels: one tool, one shape, one honest default ----------
+test('labels: substring 与 popular 两个模式回传同一种形状', () => {
+  const { s, dir } = newStore();
+  try {
+    s.addNode({ id: 'n1', title: 'zig compiler notes' });
+    s.addNode({ id: 'n2', title: 'r32 register machine' });
+    s.addNode({ id: 'n3', title: 'unrelated note' });
+    s.addEdge({ source: 'n1', target: 'n2', weight: 1 });
+    s.addEdge({ source: 'n1', target: 'n3', weight: 1 });
+    const popular = s.popularLabels(3);
+    const substring = s.searchLabels('zig', 3);
+    assert.equal(substring.length, 1, 'substring mode finds the title');
+    assert.deepEqual(Object.keys(substring[0]).sort(), Object.keys(popular[0]).sort(), 'both modes return the same keys — a schema can only describe one shape');
+    assert.equal(typeof substring[0].title, 'string');
+    assert.ok(substring[0].degree >= 2, 'degree comes from degree_cache (n1 has two edges), got ' + substring[0].degree);
+  } finally { closeStore(s, dir); }
+});
+
+test('labels: 匹配的是子字串，空查询不是全表扫描', () => {
+  const { s, dir } = newStore();
+  try {
+    s.addNode({ id: 'a1', title: 'zig compiler notes' });
+    s.addNode({ id: 'a2', title: 'notes about ziggurat' });
+    s.addNode({ id: 'a3', title: 'nothing here' });
+    assert.equal(s.searchLabels('compiler', 5).length, 1, 'matches in the middle of a title — the parameter was called prefix but never was one');
+    assert.equal(s.searchLabels('zig', 5).length, 2, 'matches every title containing the fragment');
+    assert.deepEqual(s.searchLabels('', 5), [], 'empty query stays empty: the DEFAULT call is what answers the promise');
+  } finally { closeStore(s, dir); }
+});
+
+test('labels: 无参数调用落到 degree 排序，而不是一个自信的空答案', () => {
+  assert.equal(labelsPlan({}), 'popular', 'no arguments → degree ranking');
+  assert.equal(labelsPlan({ limit: 5 }), 'popular', 'a limit alone still asks the default question');
+  assert.equal(labelsPlan({ popular: true }), 'popular');
+  assert.equal(labelsPlan({ prefix: 'zig' }), 'substring', 'an explicit fragment wins');
+  assert.equal(labelsPlan({ prefix: 'zig', popular: false }), 'substring');
+  assert.equal(labelsPlan({ popular: false }), 'substring', 'explicit popular:false with no fragment stays a substring query (→ []) — behaviour unchanged, and now documented');
 });
