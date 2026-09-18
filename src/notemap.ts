@@ -104,14 +104,6 @@ export function embedAll(batchSize?: number): number {
 }
 
 /**
- * One shape for both modes: `{title, degree}[]`.
- *
- * The no-argument call carries the tool's promise ("what does this graph know?"), so it answers
- * with the degree ranking. It used to fall through to `searchLabels('')`, which returns [] by
- * design — a confident "this graph knows nothing" on a 4,919-node graph, with nothing in the
- * result to say otherwise. The empty guard is right; the DEFAULT was what had to move.
- */
-/**
  * Which mode a labels call means. Pure, so the DEFAULT is a tested decision and not a side effect
  * of the argument parsing.
  *
