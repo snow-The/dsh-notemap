@@ -853,7 +853,9 @@ function closeStore() {
   }
 }
 function addNote(args) {
-  return getStore().addNode(args);
+  const meta = { ...args.meta ?? {} };
+  if (meta.provenance == null) meta.provenance = args.provenance ?? "agent_authored";
+  return getStore().addNode({ ...args, meta });
 }
 function linkNotes(args) {
   return getStore().addEdge(args);
@@ -1675,7 +1677,7 @@ async function importSessions(opts) {
         if (idx < prevEvents && !force) continue;
         const id = "chk:" + fileKey + ":" + idx;
         const topic = extractTopic(summary);
-        await addNote({ id, title: topic || "checkpoint " + (idx + 1), content: summary.slice(0, 800), type: "checkpoint", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
+        await addNote({ id, title: topic || "checkpoint " + (idx + 1), content: summary.slice(0, 800), type: "checkpoint", provenance: "session_derived", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         chkNodes.push(id);
         checkpoints++;
       } else if (c.includes("system-reminder") || c.startsWith("<") && c.includes(">")) {
@@ -1686,7 +1688,7 @@ async function importSessions(opts) {
         const aidx = asstIdx++;
         if (aidx < prevAsst && !force) continue;
         const id = "asst:" + fileKey + ":" + aidx;
-        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "assistant-event", meta: { file: base, episode: { ...episode, index: aidx, line: lineIdx } } });
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "assistant-event", provenance: "session_derived", meta: { file: base, episode: { ...episode, index: aidx, line: lineIdx } } });
         asstNodes.push(id);
         assistants++;
       } else if (evType === "user/message" || evType === "") {
@@ -1695,7 +1697,7 @@ async function importSessions(opts) {
         const idx = evtIdx++;
         if (idx < prevEvents && !force) continue;
         const id = "evt:" + fileKey + ":" + idx;
-        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "session-event", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
+        await addNote({ id, title: clean.slice(0, 60), content: clean.slice(0, 600), type: "session-event", provenance: "session_derived", meta: { file: base, episode: { ...episode, index: idx, line: lineIdx } } });
         evtNodes.push(id);
         events++;
       }
@@ -1706,6 +1708,7 @@ async function importSessions(opts) {
       id: sessId,
       title,
       type: "session",
+      provenance: "session_derived",
       content: chkIdx + " checkpoint(s), " + evtIdx + " event(s), " + asstIdx + " assistant(s) from " + base,
       meta: { file: base, import_hash: fileHash, imported_events: totalImported, imported_asst: asstIdx, import_version: IMPORT_VERSION, episode }
     });
@@ -1732,7 +1735,8 @@ function apply(ctx) {
         title: { type: "string", description: "Node title" },
         content: { type: "string", description: "Node body content (optional)" },
         type: { type: "string", description: "Node type, default note" },
-        id: { type: "string", description: "Explicit node id (optional, default uuid)" }
+        id: { type: "string", description: "Explicit node id (optional, default uuid)" },
+        provenance: { type: "string", enum: ["agent_authored", "external_source"], description: "agent_authored (default) for something written on purpose; external_source when the content came from OUTSIDE the session (fetched page, pasted document). session_derived is reserved for the automatic importers." }
       },
       required: ["title"]
     },
@@ -1967,7 +1971,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_import_session",
-    description: "Scan ~/.dsh/sessions/**/session.jsonl.zstd and extract each session into the knowledge graph: session node + checkpoint nodes (ACP-compacted summaries, the real knowledge density) + user event nodes (skipping runtime-context/system noise). Dual watermark (file hash + event count) makes reruns idempotent; force re-imports everything. Uses zstd CLI when available.",
+    description: 'Scan ~/.dsh/sessions/**/session.jsonl.zstd and extract each session into the knowledge graph: session node + checkpoint nodes (ACP-compacted summaries, the real knowledge density) + user event nodes (skipping runtime-context/system noise). Dual watermark (file hash + event count) makes reruns idempotent; force re-imports everything. Every node written here is stamped meta.provenance = session_derived, so a caller can keep the graph free of imported material with notemap_filter {"meta.provenance": {"ne": "session_derived"}}. Uses zstd CLI when available.',
     parameters: {
       type: "object",
       properties: {
@@ -2003,7 +2007,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_filter",
-    description: 'Filter nodes by a DSL over type + meta: {type: v, "meta.k": {eq|ne|gt|gte|lt|lte|in|exists}, AND/OR/NOT}. Meta matched via json_each.',
+    description: 'Filter nodes by a DSL over type + meta: {type: v, "meta.k": {eq|ne|gt|gte|lt|lte|in|exists}, AND/OR/NOT}. Meta matched via json_each. Canonical use: {"meta.provenance": {"ne": "session_derived"}} returns only what an explicit tool call wrote (provenance = agent_authored | session_derived | external_source).',
     parameters: {
       type: "object",
       properties: {

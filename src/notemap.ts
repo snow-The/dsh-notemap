@@ -20,8 +20,22 @@ export function closeStore(): void {
 }
 
 // ---------- tool implementations ----------
-export function addNote(args: { title: string; content?: string; type?: string; id?: string; meta?: Record<string, unknown> }): NodeRecord {
-  return getStore().addNode(args);
+/**
+ * Where a node came from. PMPA (arXiv 2609.13889) showed that on a harness-based agent the WRITE path
+ * is the only control point — a read-side filter cannot undo a poisoned memory (C-ASR 96.7 -> 96.7).
+ * The vocabulary is deliberately small:
+ *   agent_authored  — an explicit tool call (notemap_add / notemap_commit)
+ *   session_derived — written by an automatic importer (session logs, ACP graph, handoff network)
+ *   external_source — the caller DECLARES that the content came from outside the session (fetched
+ *                     page, pasted document). This does not gate anything by itself; it makes the
+ *                     channel visible and filterable, which is what a gate would need to key on.
+ */
+export type Provenance = 'agent_authored' | 'session_derived' | 'external_source';
+
+export function addNote(args: { title: string; content?: string; type?: string; id?: string; meta?: Record<string, unknown>; provenance?: Provenance }): NodeRecord {
+  const meta = { ...(args.meta ?? {}) };
+  if (meta.provenance == null) meta.provenance = args.provenance ?? 'agent_authored';
+  return getStore().addNode({ ...args, meta });
 }
 
 export function linkNotes(args: { source: string; target: string; type?: string; weight?: number; confidence?: number; meta?: Record<string, unknown> }): EdgeRecord {

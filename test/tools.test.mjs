@@ -140,6 +140,17 @@ test('both labels modes return the same record shape', async () => {
   assert.deepEqual(Object.keys(substring[0]).sort(), Object.keys(popular[0]).sort(), 'one tool must not return two shapes');
 });
 
+test('provenance: explicit writes say so, and the filter can select on it', async () => {
+  const add = tools.get('notemap_add');
+  const declared = await add.execute({ title: 'provenance probe', provenance: 'external_source' }, {});
+  assert.equal(declared.meta.provenance, 'external_source', 'a declared external source is recorded verbatim');
+  const plain = await add.execute({ title: 'plain probe' }, {});
+  assert.equal(plain.meta.provenance, 'agent_authored', 'an explicit tool call defaults to agent_authored');
+  const filtered = await tools.get('notemap_filter').execute({ filter: { 'meta.provenance': { eq: 'external_source' } }, limit: 10 }, {});
+  assert.equal(filtered.length, 1, 'the provenance DSL selects exactly the declared node');
+  assert.equal(filtered[0].id, declared.id);
+});
+
 test('a pathless pair is an empty array, never null', async () => {
   assert.deepEqual(await tools.get('notemap_paths').execute({ from: 'no-a', to: 'no-b' }, {}), []);
 });

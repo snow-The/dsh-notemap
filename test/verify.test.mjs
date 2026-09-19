@@ -112,6 +112,13 @@ test('P2: importSessions zstd 全链路 + 幂等 + force 重导', async () => {
 
     const st = getStore().stats();
     assert.ok(st.nodes >= 4, 'session + 1 event + 1 assistant + 1 checkpoint nodes exist, got ' + st.nodes);
+
+    // Provenance (PMPA 2609.13889): every node an AUTOMATIC importer writes must say so, so a caller
+    // can keep the graph free of imported material with notemap_filter {"meta.provenance": {"ne":
+    // "session_derived"}} — the write path is the only place the distinction can be made.
+    const imported = getStore().filterNodes({ 'meta.provenance': { eq: 'session_derived' } }, 50);
+    assert.ok(imported.length >= 4, 'session + event + assistant + checkpoint are all stamped, got ' + imported.length);
+    assert.ok(imported.every((n) => n.meta.provenance === 'session_derived'), 'and stamped with the right value');
   } finally {
     cs();
     rmSync(dir, { recursive: true, force: true });
