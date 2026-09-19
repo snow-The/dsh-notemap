@@ -319,18 +319,32 @@ export function retrievalJournalPath(): string {
 /** Append one signal. NEVER throws: a measurement is not worth breaking the answer it describes. */
 export function recordRetrievalSignal(tool: string, value: unknown, exec?: { agent?: { session?: { id?: string } } }): boolean {
   try {
-    const v = value as { items?: unknown; total?: unknown; returned?: unknown; truncated?: unknown; unknown_id?: unknown } | null;
-    if (v == null || typeof v !== 'object' || !Array.isArray(v.items)) return false;
-    const unknown = v.unknown_id == null || v.unknown_id === '' ? null : String(v.unknown_id);
-    const truncated = v.truncated === true;
-    if (!truncated && unknown == null) return false;
-    appendFileSync(retrievalJournalPath(), JSON.stringify({
-      v: 1, ts: Date.now(), session: exec?.agent?.session?.id ?? null, tool,
-      total: typeof v.total === 'number' ? v.total : null,
-      returned: typeof v.returned === 'number' ? v.returned : null,
-      truncated, unknown_id: unknown,
-    }) + '\n');
-    return true;
+    const v = value as {
+      items?: unknown; total?: unknown; returned?: unknown; truncated?: unknown; unknown_id?: unknown;
+      resolved?: unknown; matched_by?: unknown; total_candidates?: unknown;
+    } | null;
+    if (v == null || typeof v !== 'object') return false;
+    const write = (body: Record<string, unknown>) => {
+      appendFileSync(retrievalJournalPath(), JSON.stringify({
+        v: 1, ts: Date.now(), session: exec?.agent?.session?.id ?? null, tool, ...body,
+      }) + '\n');
+      return true;
+    };
+    const num = (x: unknown) => (typeof x === 'number' ? x : null);
+    // Shape 1: a list envelope - the answer was CUT, or the handle did not resolve.
+    if (Array.isArray(v.items)) {
+      const unknown = v.unknown_id == null || v.unknown_id === '' ? null : String(v.unknown_id);
+      const truncated = v.truncated === true;
+      if (!truncated && unknown == null) return false;
+      return write({ kind: 'list', total: num(v.total), returned: num(v.returned), truncated, unknown_id: unknown });
+    }
+    // Shape 2: a resolver answer that did NOT resolve. "I asked for this and there is no such
+    // node" is the clearest retrieval failure we can observe, so it belongs in the same journal -
+    // it used to be excluded by the envelope check above, which made a miss invisible.
+    if (v.resolved === false) {
+      return write({ kind: 'resolve', resolved: false, matched_by: String(v.matched_by ?? 'none'), total_candidates: num(v.total_candidates) });
+    }
+    return false;
   } catch { return false; }
 }
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): void {

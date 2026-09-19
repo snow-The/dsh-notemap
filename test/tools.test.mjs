@@ -289,6 +289,19 @@ test('retrieval signals: a degenerate answer is recorded, a clean one is not', a
   assert.equal(rows[1].unknown_id, 'definitely-not-a-node');
   assert.equal(rows[1].truncated, false);
   assert.ok(rows.every((r) => typeof r.ts === "number" && r.v === 1));
+  assert.ok(rows.every((r) => r.kind === 'list'), 'both list signals say which shape they came from');
+
+  // A resolver that comes back unresolved is the same class of failure and used to be invisible:
+  // the envelope check above skipped it, so "I asked for this and there is no such node" left no trace.
+  const missed = await tools.get('notemap_resolve').execute({ handle: 'no-such-handle-anywhere' }, {});
+  assert.equal(missed.resolved, false);
+  const hit = await tools.get('notemap_resolve').execute({ handle: 'zig-1' }, {});
+  assert.equal(hit.resolved, true);
+  const afterResolve = read().slice(before);
+  assert.equal(afterResolve.length, 3, 'two list signals + the unresolved resolve, and nothing for a resolved one');
+  assert.equal(afterResolve[2].kind, 'resolve');
+  assert.equal(afterResolve[2].resolved, false);
+  assert.equal(afterResolve[2].matched_by, 'none');
 });
 
 after(() => {

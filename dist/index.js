@@ -1855,21 +1855,28 @@ function retrievalJournalPath() {
 function recordRetrievalSignal(tool, value, exec) {
   try {
     const v = value;
-    if (v == null || typeof v !== "object" || !Array.isArray(v.items)) return false;
-    const unknown = v.unknown_id == null || v.unknown_id === "" ? null : String(v.unknown_id);
-    const truncated = v.truncated === true;
-    if (!truncated && unknown == null) return false;
-    appendFileSync(retrievalJournalPath(), JSON.stringify({
-      v: 1,
-      ts: Date.now(),
-      session: exec?.agent?.session?.id ?? null,
-      tool,
-      total: typeof v.total === "number" ? v.total : null,
-      returned: typeof v.returned === "number" ? v.returned : null,
-      truncated,
-      unknown_id: unknown
-    }) + "\n");
-    return true;
+    if (v == null || typeof v !== "object") return false;
+    const write = (body) => {
+      appendFileSync(retrievalJournalPath(), JSON.stringify({
+        v: 1,
+        ts: Date.now(),
+        session: exec?.agent?.session?.id ?? null,
+        tool,
+        ...body
+      }) + "\n");
+      return true;
+    };
+    const num2 = (x) => typeof x === "number" ? x : null;
+    if (Array.isArray(v.items)) {
+      const unknown = v.unknown_id == null || v.unknown_id === "" ? null : String(v.unknown_id);
+      const truncated = v.truncated === true;
+      if (!truncated && unknown == null) return false;
+      return write({ kind: "list", total: num2(v.total), returned: num2(v.returned), truncated, unknown_id: unknown });
+    }
+    if (v.resolved === false) {
+      return write({ kind: "resolve", resolved: false, matched_by: String(v.matched_by ?? "none"), total_candidates: num2(v.total_candidates) });
+    }
+    return false;
   } catch {
     return false;
   }

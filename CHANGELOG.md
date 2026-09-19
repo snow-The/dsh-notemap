@@ -10,6 +10,10 @@
   - the reader is `dsh-session-handoff`'s `acp_status`, which prints it as the L4 layer (proposal
     A/B; 31057 Tab.4). The default path is the contract, and it is verified cross-plugin, not by
     two files that merely look alike
+  - a resolver answer that came back UNRESOLVED is recorded too (`kind: "resolve"`, `matched_by`,
+    `total_candidates`). It used to be invisible: the envelope check skipped it, so "I asked for this
+    and there is no such node" — the clearest retrieval failure there is — left no trace. Found by
+    testing the DEPLOYED artifact, not the source tree
 - test: a truncated answer and an unresolved handle each write a row (with the envelope's own
   numbers); a clean answer writes none. 38/38
 ## 0.13.0
