@@ -39,10 +39,23 @@ export declare function clearAll(): {
     nodes: number;
     edges: number;
 };
+/**
+ * The list envelope. A consumer must be able to tell \u300cnone\u300d from \u300cnot found\u300d from \u300ccut\u300d —
+ * today all three are an empty or shortened array with nothing to say which (proposal G).
+ */
+export interface ListEnvelope<T> {
+    items: T[];
+    total: number;
+    returned: number;
+    truncated: boolean;
+    unknown_id: string | null;
+}
+/** Slice to the budget and report what was left out. `unknownId` names the handle that did not resolve. */
+export declare function envelopeOf<T>(all: T[], limit: number, unknownId?: string | null): ListEnvelope<T>;
 export declare function searchNotes(args: {
     q: string;
     limit?: number;
-}): NodeRecord[];
+}): ListEnvelope<NodeRecord>;
 export declare function searchWithContext(args: {
     q: string;
     limit?: number;
@@ -58,14 +71,14 @@ export declare function searchWithContext(args: {
 export declare function findPaths(args: {
     from: string;
     to: string;
-}): string[];
+}): ListEnvelope<string>;
 export declare function findRelated(args: {
     id: string;
     limit?: number;
-}): {
+}): ListEnvelope<{
     node: NodeRecord;
     score: number;
-}[];
+}>;
 export declare function exportGraph(): ReturnType<GraphStore['exportElements']>;
 export declare function graphStats(): {
     nodes: number;
@@ -83,11 +96,11 @@ export declare function neighborsOf(args: {
     id: string;
     dir?: 'out' | 'in' | 'both';
     limit?: number;
-}): EdgeRecord[];
+}): ListEnvelope<EdgeRecord>;
 export declare function commonNeighbors(args: {
     a: string;
     b: string;
-}): string[];
+}): ListEnvelope<string>;
 export declare function subgraphOf(args: {
     seed: string;
     maxDepth?: number;
@@ -124,20 +137,20 @@ export declare function labelsOf(args: {
     prefix?: string;
     popular?: boolean;
     limit?: number;
-}): {
+}): ListEnvelope<{
     title: string;
     degree: number;
-}[];
+}>;
 export declare function searchFusedOf(args: {
     q: string;
     limit?: number;
     maxDepth?: number;
     budget?: number;
-}): {
+}): ListEnvelope<{
     node: NodeRecord;
     score: number;
-}[];
+}>;
 export declare function filterNodesOf(args: {
     filter: Record<string, unknown>;
     limit?: number;
-}): NodeRecord[];
+}): ListEnvelope<NodeRecord>;

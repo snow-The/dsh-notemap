@@ -54,22 +54,43 @@ export function clearAll(): { nodes: number; edges: number } {
   return getStore().clearAll();
 }
 
-export function searchNotes(args: { q: string; limit?: number }): NodeRecord[] {
-  return getStore().searchNodes(args.q, args.limit ?? 20);
+/**
+ * The list envelope. A consumer must be able to tell \u300cnone\u300d from \u300cnot found\u300d from \u300ccut\u300d —
+ * today all three are an empty or shortened array with nothing to say which (proposal G).
+ */
+export interface ListEnvelope<T> { items: T[]; total: number; returned: number; truncated: boolean; unknown_id: string | null }
+
+/** Slice to the budget and report what was left out. `unknownId` names the handle that did not resolve. */
+export function envelopeOf<T>(all: T[], limit: number, unknownId: string | null = null): ListEnvelope<T> {
+  const items = all.slice(0, Math.max(0, Math.floor(limit)));
+  return { items, total: all.length, returned: items.length, truncated: all.length > items.length, unknown_id: unknownId };
+}
+
+/** The id that does not resolve, or null when every handle exists. */
+function missingId(...ids: string[]): string | null {
+  for (const id of ids) if (getStore().getNode(id) == null) return id;
+  return null;
+}
+
+/** Envelope cap: larger than any realistic full set here, so `total` is the true size. */
+const TOTAL_CAP = 10000;
+
+export function searchNotes(args: { q: string; limit?: number }): ListEnvelope<NodeRecord> {
+  return envelopeOf(getStore().searchNodes(args.q, TOTAL_CAP), args.limit ?? 20);
 }
 
 export function searchWithContext(args: { q: string; limit?: number }) {
   return getStore().searchWithContext(args.q, args.limit ?? 10);
 }
 
-export function findPaths(args: { from: string; to: string }): string[] {
-  // Never `null`: the declared output schema is one array shape, and the host validates the
-  // returned value against it, so "no path" must be an empty array rather than a second type.
-  return getStore().shortestPath(args.from, args.to) ?? [];
+export function findPaths(args: { from: string; to: string }): ListEnvelope<string> {
+  // Bitemporal shortest path, `[]` when no route exists; the envelope says whether an endpoint was
+  // the reason (`unknown_id`), which an empty array never could.
+  return envelopeOf(getStore().shortestPath(args.from, args.to) ?? [], TOTAL_CAP, missingId(args.from, args.to));
 }
 
-export function findRelated(args: { id: string; limit?: number }): { node: NodeRecord; score: number }[] {
-  return getStore().related(args.id, args.limit ?? 10);
+export function findRelated(args: { id: string; limit?: number }): ListEnvelope<{ node: NodeRecord; score: number }> {
+  return envelopeOf(getStore().related(args.id, TOTAL_CAP), args.limit ?? 10, missingId(args.id));
 }
 
 export function exportGraph(): ReturnType<GraphStore['exportElements']> {
@@ -92,13 +113,15 @@ export function pagerank(): Record<string, number> {
   return getStore().pageRank();
 }
 
-export function neighborsOf(args: { id: string; dir?: 'out' | 'in' | 'both'; limit?: number }): EdgeRecord[] {
+export function neighborsOf(args: { id: string; dir?: 'out' | 'in' | 'both'; limit?: number }): ListEnvelope<EdgeRecord> {
   const all = getStore().neighbors(args.id, args.dir ?? 'out');
-  return all.slice(0, args.limit ?? 50);
+  // Rank BEFORE cutting: 'first 50' is an arbitrary slice, 'top 50 by weight*confidence' is a budget.
+  all.sort((a, b) => (b.weight * b.confidence) - (a.weight * a.confidence));
+  return envelopeOf(all, args.limit ?? 50, missingId(args.id));
 }
 
-export function commonNeighbors(args: { a: string; b: string }): string[] {
-  return getStore().commonNeighbors(args.a, args.b);
+export function commonNeighbors(args: { a: string; b: string }): ListEnvelope<string> {
+  return envelopeOf(getStore().commonNeighbors(args.a, args.b), TOTAL_CAP, missingId(args.a, args.b));
 }
 
 export function subgraphOf(args: { seed: string; maxDepth?: number; maxNodes?: number }) {
@@ -131,16 +154,19 @@ export function labelsPlan(args: { prefix?: string; popular?: boolean }): 'popul
   return args.popular || askedNothing ? 'popular' : 'substring';
 }
 
-export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: number }): { title: string; degree: number }[] {
+export function labelsOf(args: { prefix?: string; popular?: boolean; limit?: number }): ListEnvelope<{ title: string; degree: number }> {
   const limit = args.limit ?? 20;
-  if (labelsPlan(args) === 'popular') return getStore().popularLabels(limit);
-  return getStore().searchLabels(String(args.prefix ?? '').trim(), limit);
+  const all = labelsPlan(args) === 'popular'
+    ? getStore().popularLabels(TOTAL_CAP)
+    : getStore().searchLabels(String(args.prefix ?? '').trim(), TOTAL_CAP);
+  return envelopeOf(all, limit);
 }
 
-export function searchFusedOf(args: { q: string; limit?: number; maxDepth?: number; budget?: number }): { node: NodeRecord; score: number }[] {
-  return getStore().searchFused(args.q, { limit: args.limit, maxDepth: args.maxDepth, budget: args.budget });
+export function searchFusedOf(args: { q: string; limit?: number; maxDepth?: number; budget?: number }): ListEnvelope<{ node: NodeRecord; score: number }> {
+  const all = getStore().searchFused(args.q, { limit: TOTAL_CAP, maxDepth: args.maxDepth, budget: args.budget });
+  return envelopeOf(all, args.limit ?? 20);
 }
 
-export function filterNodesOf(args: { filter: Record<string, unknown>; limit?: number }): NodeRecord[] {
-  return getStore().filterNodes(args.filter ?? {}, args.limit ?? 50);
+export function filterNodesOf(args: { filter: Record<string, unknown>; limit?: number }): ListEnvelope<NodeRecord> {
+  return envelopeOf(getStore().filterNodes(args.filter ?? {}, TOTAL_CAP), args.limit ?? 50);
 }

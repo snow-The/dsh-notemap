@@ -866,17 +866,26 @@ function removeNote(id) {
 function clearAll() {
   return getStore().clearAll();
 }
+function envelopeOf(all, limit, unknownId = null) {
+  const items = all.slice(0, Math.max(0, Math.floor(limit)));
+  return { items, total: all.length, returned: items.length, truncated: all.length > items.length, unknown_id: unknownId };
+}
+function missingId(...ids) {
+  for (const id of ids) if (getStore().getNode(id) == null) return id;
+  return null;
+}
+var TOTAL_CAP = 1e4;
 function searchNotes(args) {
-  return getStore().searchNodes(args.q, args.limit ?? 20);
+  return envelopeOf(getStore().searchNodes(args.q, TOTAL_CAP), args.limit ?? 20);
 }
 function searchWithContext(args) {
   return getStore().searchWithContext(args.q, args.limit ?? 10);
 }
 function findPaths(args) {
-  return getStore().shortestPath(args.from, args.to) ?? [];
+  return envelopeOf(getStore().shortestPath(args.from, args.to) ?? [], TOTAL_CAP, missingId(args.from, args.to));
 }
 function findRelated(args) {
-  return getStore().related(args.id, args.limit ?? 10);
+  return envelopeOf(getStore().related(args.id, TOTAL_CAP), args.limit ?? 10, missingId(args.id));
 }
 function exportGraph() {
   return getStore().exportElements();
@@ -895,10 +904,11 @@ function pagerank() {
 }
 function neighborsOf(args) {
   const all = getStore().neighbors(args.id, args.dir ?? "out");
-  return all.slice(0, args.limit ?? 50);
+  all.sort((a, b) => b.weight * b.confidence - a.weight * a.confidence);
+  return envelopeOf(all, args.limit ?? 50, missingId(args.id));
 }
 function commonNeighbors(args) {
-  return getStore().commonNeighbors(args.a, args.b);
+  return envelopeOf(getStore().commonNeighbors(args.a, args.b), TOTAL_CAP, missingId(args.a, args.b));
 }
 function subgraphOf(args) {
   return getStore().subgraph(args.seed, args.maxDepth ?? 2, args.maxNodes ?? 50);
@@ -918,14 +928,15 @@ function labelsPlan(args) {
 }
 function labelsOf(args) {
   const limit = args.limit ?? 20;
-  if (labelsPlan(args) === "popular") return getStore().popularLabels(limit);
-  return getStore().searchLabels(String(args.prefix ?? "").trim(), limit);
+  const all = labelsPlan(args) === "popular" ? getStore().popularLabels(TOTAL_CAP) : getStore().searchLabels(String(args.prefix ?? "").trim(), TOTAL_CAP);
+  return envelopeOf(all, limit);
 }
 function searchFusedOf(args) {
-  return getStore().searchFused(args.q, { limit: args.limit, maxDepth: args.maxDepth, budget: args.budget });
+  const all = getStore().searchFused(args.q, { limit: TOTAL_CAP, maxDepth: args.maxDepth, budget: args.budget });
+  return envelopeOf(all, args.limit ?? 20);
 }
 function filterNodesOf(args) {
-  return getStore().filterNodes(args.filter ?? {}, args.limit ?? 50);
+  return envelopeOf(getStore().filterNodes(args.filter ?? {}, TOTAL_CAP), args.limit ?? 50);
 }
 
 // src/acp.ts
@@ -1519,11 +1530,20 @@ var defineTool = (o) => {
     output: o.output ?? { schema: { type: "object", additionalProperties: true }, render: () => [] }
   });
 };
-var arrayOut = (items = { type: "object", additionalProperties: true }) => ({
-  schema: { type: "array", items },
+var listOut = (items = { type: "object", additionalProperties: true }) => ({
+  schema: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      items: { type: "array", items },
+      total: { type: "number" },
+      returned: { type: "number" },
+      truncated: { type: "boolean" },
+      unknown_id: { oneOf: [{ type: "string" }, { type: "null" }] }
+    }
+  },
   render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
 });
-var stringArrayOut = arrayOut({ type: "string" });
 var name = "dsh-notemap";
 var inject = ["tools"];
 var RT_CTX = "Current runtime context";
@@ -1767,7 +1787,7 @@ function apply(ctx) {
         limit: { type: "number", description: "Max results (default 20)" }
       }
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => labelsOf(args)
   }));
   reg(defineTool({
@@ -1833,7 +1853,7 @@ function apply(ctx) {
       },
       required: ["q"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => searchNotes(args)
   }));
   reg(defineTool({
@@ -1847,7 +1867,7 @@ function apply(ctx) {
       },
       required: ["from", "to"]
     },
-    output: stringArrayOut,
+    output: listOut({ type: "string" }),
     execute: (args) => findPaths(args)
   }));
   reg(defineTool({
@@ -1861,7 +1881,7 @@ function apply(ctx) {
       },
       required: ["id"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => findRelated(args)
   }));
   reg(defineTool({
@@ -1910,7 +1930,7 @@ function apply(ctx) {
       },
       required: ["id"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => neighborsOf(args)
   }));
   reg(defineTool({
@@ -1921,7 +1941,7 @@ function apply(ctx) {
       properties: { a: { type: "string" }, b: { type: "string" } },
       required: ["a", "b"]
     },
-    output: stringArrayOut,
+    output: listOut({ type: "string" }),
     execute: (args) => commonNeighbors(args)
   }));
   reg(defineTool({
@@ -1949,7 +1969,7 @@ function apply(ctx) {
       },
       required: ["query"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => {
       const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h) => ({
         id: h.node?.id,
@@ -1966,7 +1986,7 @@ function apply(ctx) {
         snippet: h.summary.slice(0, 120),
         linked: "[acp_graph \u8DE8\u4F1A\u8BDD]"
       }));
-      return [...acpHits, ...local].slice(0, args.limit ?? 10);
+      return envelopeOf([...acpHits, ...local], args.limit ?? 10);
     }
   }));
   reg(defineTool({
@@ -2002,7 +2022,7 @@ function apply(ctx) {
       },
       required: ["q"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => searchFusedOf(args)
   }));
   reg(defineTool({
@@ -2011,12 +2031,17 @@ function apply(ctx) {
     parameters: {
       type: "object",
       properties: {
-        filter: { type: "object", description: "Filter DSL object", additionalProperties: false, properties: {} },
+        // additionalProperties MUST stay true: the DSL IS arbitrary keys ("meta.provenance", "type",
+        // AND/OR/NOT). With additionalProperties:false and no declared properties the host rejected every
+        // non-empty filter — the documented DSL never worked through the tool interface (live error:
+        // invalid arguments: "filter.meta.provenance" is not a declared property). filterNodes validates
+        // the DSL itself.
+        filter: { type: "object", description: "Filter DSL object", additionalProperties: true },
         limit: { type: "number", description: "Max results (default 50)" }
       },
       required: ["filter"]
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args) => filterNodesOf(args)
   }));
   reg(defineTool({

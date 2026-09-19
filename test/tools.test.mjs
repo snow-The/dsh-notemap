@@ -40,6 +40,25 @@ let itemChecks = 0;
 function checkShape(value, schema, label) {
   assert.ok(schema && typeof schema === 'object', label + ': the tool declares no output schema');
   const kind = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  if (schema.type === 'object' && schema.properties && schema.properties.items) {
+    // The list envelope (proposal G): the shape must SAY whether anything was missing or cut.
+    assert.equal(typeof value, 'object', label + ': expected the list envelope, got ' + kind);
+    assert.ok(Array.isArray(value.items), label + ': envelope.items must be an array');
+    assert.equal(value.returned, value.items.length, label + ': returned must equal items.length');
+    assert.ok(value.total >= value.returned, label + ': total (' + value.total + ') >= returned (' + value.returned + ')');
+    assert.equal(value.truncated, value.total > value.returned, label + ': truncated must match total > returned');
+    assert.ok(value.unknown_id === null || typeof value.unknown_id === 'string', label + ': unknown_id must be a string or null');
+    const envItemType = schema.properties.items.items && schema.properties.items.items.type;
+    if (envItemType) {
+      for (let i = 0; i < value.items.length; i++) {
+        const item = value.items[i];
+        const it = item === null ? 'null' : Array.isArray(item) ? 'array' : typeof item;
+        assert.equal(it, envItemType, label + '.items[' + i + ']: declared ' + envItemType + ', got ' + it + ' — ' + JSON.stringify(item).slice(0, 80));
+        itemChecks++;
+      }
+    }
+    return value.returned;
+  }
   if (schema.type === 'array') {
     assert.ok(Array.isArray(value), label + ': declared array, returned ' + kind);
     const itemType = schema.items && schema.items.type;
@@ -119,25 +138,40 @@ test('the seeded inputs really do produce non-empty arrays (no vacuous passes)',
   ];
   for (const [name, args, min] of nonEmpty) {
     const v = await tools.get(name).execute(args, {});
-    const n = Array.isArray(v) ? v.length : -1;
+    const n = v && Array.isArray(v.items) ? v.items.length : -1;
     assert.ok(n >= min, name + JSON.stringify(args) + ' returned ' + n + ' items, expected >= ' + min);
   }
 });
 
 test('the default labels call answers "what does this graph know?"', async () => {
-  const rows = await tools.get('notemap_labels').execute({}, {});
-  assert.ok(rows.length > 0, 'a seeded graph must not answer "nothing"');
+  const env = await tools.get('notemap_labels').execute({}, {});
+  const rows = env.items;
+  assert.ok(env.total > 0, 'a seeded graph must not answer "nothing" (total, not just returned)');
+  assert.ok(rows.length > 0, 'and the rows themselves must be delivered');
   assert.ok(rows.every((r) => typeof r.title === 'string' && typeof r.degree === 'number'), 'rows are {title, degree} records');
   assert.equal(rows[0].title, 'zig compiler notes', 'highest degree first (zig-1 holds both edges)');
   const explicitEmpty = await tools.get('notemap_labels').execute({ prefix: '' }, {});
-  assert.deepEqual(explicitEmpty, [], 'an explicit empty fragment asks "what matches nothing" — not the default question');
+  assert.deepEqual(explicitEmpty.items, [], 'an explicit empty fragment asks "what matches nothing" — not the default question');
+  assert.equal(explicitEmpty.total, 0);
 });
 
 test('both labels modes return the same record shape', async () => {
   const substring = await tools.get('notemap_labels').execute({ prefix: 'zig' }, {});
   const popular = await tools.get('notemap_labels').execute({ popular: true }, {});
-  assert.ok(substring.length > 0 && popular.length > 0, 'both branches must return rows for this seed');
-  assert.deepEqual(Object.keys(substring[0]).sort(), Object.keys(popular[0]).sort(), 'one tool must not return two shapes');
+  assert.ok(substring.items.length > 0 && popular.items.length > 0, 'both branches must return rows for this seed');
+  assert.deepEqual(Object.keys(substring.items[0]).sort(), Object.keys(popular.items[0]).sort(), 'one tool must not return two shapes');
+});
+
+test('the envelope tells "not found" from "cut" — the two lies an array cannot tell apart', async () => {
+  const missing = await tools.get('notemap_neighbors').execute({ id: 'definitely-not-a-node' }, {});
+  assert.deepEqual(missing.items, []);
+  assert.equal(missing.unknown_id, 'definitely-not-a-node', 'an unresolved handle is NAMED, not silently empty');
+  assert.equal(missing.total, 0);
+  const cut = await tools.get('notemap_neighbors').execute({ id: 'zig-1', limit: 1 }, {});
+  assert.equal(cut.returned, 1, 'the budget is honoured');
+  assert.equal(cut.total, 2, 'zig-1 has two edges in the seed graph');
+  assert.equal(cut.truncated, true, 'and the cut is admitted');
+  assert.equal(cut.unknown_id, null, 'a resolved handle is not reported as missing');
 });
 
 test('provenance: explicit writes say so, and the filter can select on it', async () => {
@@ -147,12 +181,14 @@ test('provenance: explicit writes say so, and the filter can select on it', asyn
   const plain = await add.execute({ title: 'plain probe' }, {});
   assert.equal(plain.meta.provenance, 'agent_authored', 'an explicit tool call defaults to agent_authored');
   const filtered = await tools.get('notemap_filter').execute({ filter: { 'meta.provenance': { eq: 'external_source' } }, limit: 10 }, {});
-  assert.equal(filtered.length, 1, 'the provenance DSL selects exactly the declared node');
-  assert.equal(filtered[0].id, declared.id);
+  assert.equal(filtered.items.length, 1, 'the provenance DSL selects exactly the declared node');
+  assert.equal(filtered.items[0].id, declared.id);
 });
 
 test('a pathless pair is an empty array, never null', async () => {
-  assert.deepEqual(await tools.get('notemap_paths').execute({ from: 'no-a', to: 'no-b' }, {}), []);
+  const p = await tools.get('notemap_paths').execute({ from: 'no-a', to: 'no-b' }, {});
+  assert.deepEqual(p.items, [], 'no route is an empty item list, never null');
+  assert.equal(p.unknown_id, 'no-a', 'and the envelope names the handle that did not resolve');
 });
 
 test('an unresolved seed is REPORTED, not returned as a valid empty subgraph', async () => {

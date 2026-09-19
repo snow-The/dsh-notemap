@@ -31,16 +31,22 @@ const defineTool = (o: any) => {
  * this host (built-in `job_list` returns one); they must simply be DECLARED. Two item shapes exist
  * here: record arrays and plain string arrays (ids/labels).
  */
-const arrayOut = (items: Record<string, unknown> = { type: 'object', additionalProperties: true }) => ({
-  schema: { type: 'array', items },
+const listOut = (items: Record<string, unknown> = { type: 'object', additionalProperties: true }) => ({
+  schema: {
+    type: 'object', additionalProperties: true,
+    properties: {
+      items: { type: 'array', items },
+      total: { type: 'number' }, returned: { type: 'number' }, truncated: { type: 'boolean' },
+      unknown_id: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    },
+  },
   render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) }],
 });
-const stringArrayOut = arrayOut({ type: 'string' });
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
   removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
-  searchFusedOf, filterNodesOf,
+  searchFusedOf, filterNodesOf, envelopeOf,
 } from './notemap.ts';
 import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts';
 import { buildNetwork, agentTree, consensusRecall } from './network.ts';
@@ -315,7 +321,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
         limit: { type: 'number', description: 'Max results (default 20)' },
       },
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { prefix?: string; popular?: boolean; limit?: number }) => labelsOf(args),
   }));
 
@@ -385,7 +391,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['q'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { q: string; limit?: number }) => searchNotes(args),
   }));
 
@@ -400,7 +406,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['from', 'to'],
     },
-    output: stringArrayOut,
+    output: listOut({ type: 'string' }),
     execute: (args: { from: string; to: string }) => findPaths(args),
   }));
 
@@ -415,7 +421,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['id'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { id: string; limit?: number }) => findRelated(args),
   }));
 
@@ -470,7 +476,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['id'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { id: string; dir?: 'out' | 'in' | 'both'; limit?: number }) => neighborsOf(args),
   }));
 
@@ -482,7 +488,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       properties: { a: { type: 'string' }, b: { type: 'string' } },
       required: ['a', 'b'],
     },
-    output: stringArrayOut,
+    output: listOut({ type: 'string' }),
     execute: (args: { a: string; b: string }) => commonNeighbors(args),
   }));
 
@@ -512,7 +518,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['query'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { query: string; limit?: number }) => {
       const local = searchWithContext({ q: args.query, limit: args.limit ?? 10 }).map((h: any) => ({
         id: h.node?.id,
@@ -527,7 +533,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
         id: h.node, title: h.node, type: 'acp-checkpoint',
         snippet: h.summary.slice(0, 120), linked: '[acp_graph 跨会话]',
       }));
-      return [...acpHits, ...local].slice(0, args.limit ?? 10);
+      return envelopeOf([...acpHits, ...local], args.limit ?? 10);
     },
   }));
 
@@ -566,7 +572,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       },
       required: ['q'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { q: string; limit?: number; maxDepth?: number; budget?: number }) => searchFusedOf(args),
   }));
 
@@ -576,12 +582,17 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
     parameters: {
       type: 'object',
       properties: {
-        filter: { type: 'object', description: 'Filter DSL object', additionalProperties: false, properties: {} },
+        // additionalProperties MUST stay true: the DSL IS arbitrary keys ("meta.provenance", "type",
+        // AND/OR/NOT). With additionalProperties:false and no declared properties the host rejected every
+        // non-empty filter — the documented DSL never worked through the tool interface (live error:
+        // invalid arguments: "filter.meta.provenance" is not a declared property). filterNodes validates
+        // the DSL itself.
+        filter: { type: 'object', description: 'Filter DSL object', additionalProperties: true },
         limit: { type: 'number', description: 'Max results (default 50)' },
       },
       required: ['filter'],
     },
-    output: arrayOut(),
+    output: listOut(),
     execute: (args: { filter: Record<string, unknown>; limit?: number }) => filterNodesOf(args),
   }));
 
