@@ -112,6 +112,10 @@ const readCases = [
   ['notemap_agents', { limit: 5 }],
   ['notemap_consensus', { q: 'zig', limit: 5 }],
   ['notemap_export', {}],
+  ['notemap_resolve', { handle: 'zig-1' }],
+  ['notemap_resolve', { handle: 'zig compiler notes' }],
+  ['notemap_resolve', { handle: 'no-such-node' }],
+  ['notemap_resolve', { handle: 'zig', limit: 2 }],
 ];
 
 test('the declared output matches the value the handler actually returns', async () => {
@@ -205,6 +209,61 @@ test('an unresolved seed is REPORTED, not returned as a valid empty subgraph', a
 
   // The distinction is the whole fix, so assert it as one:
   assert.notEqual(byTitle.seedFound, real.seedFound);
+});
+
+test('resolve: a title is a valid handle, and an id still wins', async () => {
+  const byTitle = await tools.get('notemap_resolve').execute({ handle: 'zig compiler notes' }, {});
+  assert.equal(byTitle.resolved, true, 'an exact title resolves - that is the whole point of the tool');
+  assert.equal(byTitle.id, 'zig-1');
+  assert.equal(byTitle.matched_by, 'title');
+  const byId = await tools.get('notemap_resolve').execute({ handle: 'zig-1' }, {});
+  assert.equal(byId.matched_by, 'id', 'identity beats a title that merely looks like an id');
+  assert.equal(byId.confidence, 1);
+  for (const [k, t] of [['resolved', 'boolean'], ['candidates', 'object'], ['total_candidates', 'number'], ['confidence', 'number'], ['duplicates', 'object']]) {
+    assert.equal(typeof byId[k], t, 'resolve always carries ' + k + ' (shape is part of the contract)');
+  }
+  assert.ok(byId.hash === null || typeof byId.hash === 'string', 'hash is a string or an explicit null');
+  assert.ok(byId.hash && byId.hash.length === 16, 'and it is a content hash, not a placeholder: ' + byId.hash);
+});
+
+test('resolve: two nodes sharing a title come back as candidates, never as a pick', async () => {
+  // addNode upserts on id, not on title, so one title under two ids is a real state of this graph.
+  store.addNode({ id: 'dup-a', title: 'same title twice' });
+  store.addNode({ id: 'dup-b', title: 'same title twice' });
+  const r = await tools.get('notemap_resolve').execute({ handle: 'same title twice' }, {});
+  assert.equal(r.resolved, false, 'a shared title must not resolve to whichever row came back first');
+  assert.equal(r.matched_by, 'ambiguous');
+  assert.equal(r.total_candidates, 2);
+  assert.equal(r.candidates.length, 2);
+  assert.deepEqual(r.candidates.map((c) => c.id).sort(), ['dup-a', 'dup-b']);
+  assert.equal(r.id, null, 'nothing resolved, so there is no id to mistake for an answer');
+  const capped = await tools.get('notemap_resolve').execute({ handle: 'same title twice', limit: 1 }, {});
+  assert.equal(capped.candidates.length, 1);
+  assert.equal(capped.total_candidates, 2, 'a capped candidate list still says how many there were');
+});
+
+test('resolve: a near miss SUGGESTS, it does not resolve', async () => {
+  const r = await tools.get('notemap_resolve').execute({ handle: 'zig compiler' }, {});
+  assert.equal(r.resolved, false, 'a substring is a suggestion, and a suggestion is not a resolution');
+  assert.equal(r.matched_by, 'none');
+  assert.equal(r.hash, null);
+  assert.ok(r.total_candidates >= 1);
+  assert.ok(r.candidates.some((c) => c.id === 'zig-1'), 'the suggestions name what the graph does have');
+  const nothing = await tools.get('notemap_resolve').execute({ handle: 'no-such-thing-anywhere' }, {});
+  assert.deepEqual(nothing.candidates, []);
+  assert.equal(nothing.total_candidates, 0);
+});
+
+test('resolve: the hash is a content identity, so two ids read as one note', async () => {
+  const a = await tools.get('notemap_resolve').execute({ handle: 'dup-a' }, {});
+  const b = await tools.get('notemap_resolve').execute({ handle: 'dup-b' }, {});
+  assert.equal(a.hash, b.hash, 'same title + same content = same knowledge, whatever the id');
+  assert.deepEqual(a.duplicates, ['dup-b'], 'and the other id is reported as a duplicate');
+  const added = await tools.get('notemap_add').execute({ title: 'hash probe', content: 'v1' }, {});
+  const h1 = (await tools.get('notemap_resolve').execute({ handle: added.id }, {})).hash;
+  await tools.get('notemap_add').execute({ id: added.id, title: 'hash probe', content: 'v2' }, {});
+  const h2 = (await tools.get('notemap_resolve').execute({ handle: added.id }, {})).hash;
+  assert.notEqual(h1, h2, 'a rewritten note must not keep its old content identity');
 });
 
 after(() => {

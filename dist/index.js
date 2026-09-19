@@ -3,6 +3,7 @@ import { defineTool as dshDefineTool } from "@deepseek-ai/dsh-tools";
 
 // src/graph.ts
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 var SCHEMA_VERSION = 2;
@@ -826,6 +827,86 @@ var GraphStore = class {
     ).all(limit);
     return rows;
   }
+  /**
+   * Content identity: sha1 over normalized title+content, 16 hex chars (the same width the session
+   * importer stamps as import_hash). Two ids with the same hash are the same knowledge; a hash that
+   * CHANGED under one id means the note was rewritten, which no id can tell you.
+   */
+  contentHash(n) {
+    return createHash("sha1").update(String(n.title) + "\0" + String(n.content ?? "")).digest("hex").slice(0, 16);
+  }
+  candidateOf(n) {
+    return {
+      id: n.id,
+      title: n.title,
+      type: n.type,
+      degree: this.degreeOf(n.id),
+      content_hash: this.contentHash(n),
+      source: n.meta?.provenance ?? null,
+      updated_at: n.updated_at
+    };
+  }
+  resolveHit(n, matchedBy, confidence) {
+    const dups = this.db.prepare(
+      "SELECT id FROM nodes WHERE title = ? COLLATE NOCASE AND id <> ? AND deleted_at IS NULL LIMIT 20"
+    ).all(n.title, n.id);
+    return {
+      resolved: true,
+      id: n.id,
+      title: n.title,
+      matched_by: matchedBy,
+      candidates: [],
+      total_candidates: 1,
+      confidence,
+      source: n.meta?.provenance ?? null,
+      hash: this.contentHash(n),
+      duplicates: dups.map((d) => d.id)
+    };
+  }
+  /**
+   * Resolve a handle that may be an ID **or** a title. Exact id wins; an exact title (case-insensitive,
+   * whitespace-normalized like addNode) resolves only when it is UNIQUE; several hits come back as
+   * candidates with nothing resolved; no exact hit returns substring suggestions under matched_by
+   * 'none'. Never guesses a near-match: a wrong handle must not quietly become a different node.
+   */
+  resolveHandle(handle, limit = 10) {
+    const h = String(handle ?? "").replace(/\s+/g, " ").trim();
+    const miss = (extra = {}) => ({
+      resolved: false,
+      id: null,
+      title: null,
+      matched_by: "none",
+      candidates: [],
+      total_candidates: 0,
+      confidence: 0,
+      source: null,
+      hash: null,
+      duplicates: [],
+      ...extra
+    });
+    if (!h) return miss();
+    const direct = this.getNode(h);
+    if (direct) return this.resolveHit(direct, "id", 1);
+    const rows = this.db.prepare(
+      "SELECT * FROM nodes WHERE title = ? COLLATE NOCASE AND deleted_at IS NULL ORDER BY updated_at DESC"
+    ).all(h);
+    if (rows.length === 1) return this.resolveHit(this.rowToNode(rows[0]), "title", 0.95);
+    if (rows.length > 1) {
+      return miss({
+        matched_by: "ambiguous",
+        total_candidates: rows.length,
+        candidates: rows.slice(0, Math.max(1, limit)).map((r) => this.candidateOf(this.rowToNode(r)))
+      });
+    }
+    const like = "%" + h.replace(/[\\%_]/g, (m) => "\\" + m) + "%";
+    const total = Number(this.db.prepare(
+      "SELECT COUNT(*) AS c FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ESCAPE '\\'"
+    ).get(like).c);
+    const near = this.db.prepare(
+      "SELECT * FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?"
+    ).all(like, Math.max(1, limit));
+    return miss({ total_candidates: total, candidates: near.map((r) => this.candidateOf(this.rowToNode(r))) });
+  }
   stats() {
     const n = this.db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE deleted_at IS NULL").get();
     const e = this.db.prepare("SELECT COUNT(*) AS c FROM edges WHERE deleted_at IS NULL AND invalid_at IS NULL").get();
@@ -912,6 +993,9 @@ function commonNeighbors(args) {
 }
 function subgraphOf(args) {
   return getStore().subgraph(args.seed, args.maxDepth ?? 2, args.maxNodes ?? 50);
+}
+function resolveNode(args) {
+  return getStore().resolveHandle(args.handle, args.limit ?? 10);
 }
 function searchVector(args) {
   return getStore().searchVector(args.q, { topK: args.topK, type: args.type });
@@ -1544,6 +1628,25 @@ var listOut = (items = { type: "object", additionalProperties: true }) => ({
   },
   render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
 });
+var resolveOut = {
+  schema: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      resolved: { type: "boolean" },
+      id: { oneOf: [{ type: "string" }, { type: "null" }] },
+      title: { oneOf: [{ type: "string" }, { type: "null" }] },
+      matched_by: { type: "string" },
+      candidates: { type: "array", items: { type: "object", additionalProperties: true } },
+      total_candidates: { type: "number" },
+      confidence: { type: "number" },
+      source: { oneOf: [{ type: "string" }, { type: "null" }] },
+      hash: { oneOf: [{ type: "string" }, { type: "null" }] },
+      duplicates: { type: "array", items: { type: "string" } }
+    }
+  },
+  render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
+};
 var name = "dsh-notemap";
 var inject = ["tools"];
 var RT_CTX = "Current runtime context";
@@ -1574,8 +1677,8 @@ async function importSessions(opts) {
   const { zstdDecompressSync } = await import("node:zlib");
   const { join: join4 } = await import("node:path");
   const { homedir: homedir3 } = await import("node:os");
-  const { createHash } = await import("node:crypto");
-  const hash = (s) => createHash("sha1").update(s).digest("hex").slice(0, 16);
+  const { createHash: createHash2 } = await import("node:crypto");
+  const hash = (s) => createHash2("sha1").update(s).digest("hex").slice(0, 16);
   const root = opts?.sessionsDir ?? join4(homedir3(), ".dsh", "sessions");
   const files = [];
   const byDir = /* @__PURE__ */ new Map();
@@ -1764,7 +1867,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_context",
-    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours.",
+    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.",
     parameters: {
       type: "object",
       properties: {
@@ -1775,6 +1878,20 @@ function apply(ctx) {
       required: ["seed"]
     },
     execute: (args) => subgraphOf(args)
+  }));
+  reg(defineTool({
+    name: "notemap_resolve",
+    description: "Resolve a handle that may be a node ID OR an exact title into one node, and say HOW it matched. Call this before neighbors/related/context/paths when you only have a title: those take IDs and answer unknown_id for anything else, and they never guess. resolved:false with matched_by=ambiguous means several nodes share that title (pick one of candidates); matched_by=none means nothing matched exactly and candidates are substring near-misses. hash is a content identity (title+content), so the same note stored under two ids is visible; duplicates lists the other ids carrying the same title. source is meta.provenance (agent_authored | session_derived | external_source). To search by meaning instead use notemap_search or notemap_labels.",
+    parameters: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "Node ID or exact title (case-insensitive, whitespace-normalized)" },
+        limit: { type: "number", description: "Max candidates / near-miss suggestions to return (default 10)" }
+      },
+      required: ["handle"]
+    },
+    output: resolveOut,
+    execute: (args) => resolveNode(args)
   }));
   reg(defineTool({
     name: "notemap_labels",
@@ -1858,7 +1975,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_paths",
-    description: "Shortest path (Dijkstra, weight-aware) between two nodes. Reveals hidden chains of association.",
+    description: "Shortest path (Dijkstra, weight-aware) between two nodes. Reveals hidden chains of association. Both endpoints must be node IDs; an unknown one is NAMED in unknown_id rather than silently routing nothing. notemap_resolve turns a title into an ID.",
     parameters: {
       type: "object",
       properties: {
@@ -1872,7 +1989,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_related",
-    description: "Rank nodes related to a node by edge weight*confidence plus shared-neighbor signal.",
+    description: "Rank nodes related to a node by edge weight*confidence plus shared-neighbor signal. Takes a node ID: a title comes back as unknown_id, and notemap_resolve converts one.",
     parameters: {
       type: "object",
       properties: {
@@ -1920,7 +2037,7 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_neighbors",
-    description: "List direct neighbors (edges) of a node, direction-aware.",
+    description: "List direct neighbors (edges) of a node, direction-aware. Takes a node ID; a title comes back as unknown_id. notemap_resolve turns a title into an ID without guessing.",
     parameters: {
       type: "object",
       properties: {

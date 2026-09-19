@@ -42,11 +42,35 @@ const listOut = (items: Record<string, unknown> = { type: 'object', additionalPr
   },
   render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) }],
 });
+
+/**
+ * Output contract for notemap_resolve. It is an OBJECT, not a list envelope: the answer is
+ * "did this resolve, and if not, what were the choices" - `total_candidates` keeps the same
+ * honesty as the envelope when the candidate list itself is capped.
+ */
+const resolveOut = {
+  schema: {
+    type: 'object', additionalProperties: true,
+    properties: {
+      resolved: { type: 'boolean' },
+      id: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      title: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      matched_by: { type: 'string' },
+      candidates: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      total_candidates: { type: 'number' },
+      confidence: { type: 'number' },
+      source: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      hash: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      duplicates: { type: 'array', items: { type: 'string' } },
+    },
+  },
+  render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) }],
+};
 import {
   addNote, linkNotes, searchNotes, searchWithContext, findPaths, findRelated, exportGraph,
   graphStats, snapshotNow, centrality, pagerank, neighborsOf, commonNeighbors, closeStore,
   removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
-  searchFusedOf, filterNodesOf, envelopeOf,
+  searchFusedOf, filterNodesOf, envelopeOf, resolveNode,
 } from './notemap.ts';
 import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts';
 import { buildNetwork, agentTree, consensusRecall } from './network.ts';
@@ -297,7 +321,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_context',
-    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours.',
+    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.',
     parameters: {
       type: 'object',
       properties: {
@@ -308,6 +332,21 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       required: ['seed'],
     },
     execute: (args: { seed: string; maxDepth?: number; maxNodes?: number }) => subgraphOf(args),
+  }));
+
+  reg(defineTool({
+    name: 'notemap_resolve',
+    description: 'Resolve a handle that may be a node ID OR an exact title into one node, and say HOW it matched. Call this before neighbors/related/context/paths when you only have a title: those take IDs and answer unknown_id for anything else, and they never guess. resolved:false with matched_by=ambiguous means several nodes share that title (pick one of candidates); matched_by=none means nothing matched exactly and candidates are substring near-misses. hash is a content identity (title+content), so the same note stored under two ids is visible; duplicates lists the other ids carrying the same title. source is meta.provenance (agent_authored | session_derived | external_source). To search by meaning instead use notemap_search or notemap_labels.',
+    parameters: {
+      type: 'object',
+      properties: {
+        handle: { type: 'string', description: 'Node ID or exact title (case-insensitive, whitespace-normalized)' },
+        limit: { type: 'number', description: 'Max candidates / near-miss suggestions to return (default 10)' },
+      },
+      required: ['handle'],
+    },
+    output: resolveOut,
+    execute: (args: { handle: string; limit?: number }) => resolveNode(args),
   }));
 
   reg(defineTool({
@@ -397,7 +436,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_paths',
-    description: 'Shortest path (Dijkstra, weight-aware) between two nodes. Reveals hidden chains of association.',
+    description: 'Shortest path (Dijkstra, weight-aware) between two nodes. Reveals hidden chains of association. Both endpoints must be node IDs; an unknown one is NAMED in unknown_id rather than silently routing nothing. notemap_resolve turns a title into an ID.',
     parameters: {
       type: 'object',
       properties: {
@@ -412,7 +451,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_related',
-    description: 'Rank nodes related to a node by edge weight*confidence plus shared-neighbor signal.',
+    description: 'Rank nodes related to a node by edge weight*confidence plus shared-neighbor signal. Takes a node ID: a title comes back as unknown_id, and notemap_resolve converts one.',
     parameters: {
       type: 'object',
       properties: {
@@ -466,7 +505,7 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_neighbors',
-    description: 'List direct neighbors (edges) of a node, direction-aware.',
+    description: 'List direct neighbors (edges) of a node, direction-aware. Takes a node ID; a title comes back as unknown_id. notemap_resolve turns a title into an ID without guessing.',
     parameters: {
       type: 'object',
       properties: {

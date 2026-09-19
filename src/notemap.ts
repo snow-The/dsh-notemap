@@ -128,6 +128,15 @@ export function subgraphOf(args: { seed: string; maxDepth?: number; maxNodes?: n
   return getStore().subgraph(args.seed, args.maxDepth ?? 2, args.maxNodes ?? 50);
 }
 
+/**
+ * Turn a handle (id OR title) into a node - or into an honest refusal plus the choices.
+ * The traversal tools (neighbors/related/context/paths) take IDs only and report `unknown_id` for
+ * anything else; this is the one place that also accepts a title, and it never guesses.
+ */
+export function resolveNode(args: { handle: string; limit?: number }) {
+  return getStore().resolveHandle(args.handle, args.limit ?? 10);
+}
+
 export function searchVector(args: { q: string; topK?: number; type?: string }): { node: NodeRecord; score: number }[] {
   return getStore().searchVector(args.q, { topK: args.topK, type: args.type });
 }

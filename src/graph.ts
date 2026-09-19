@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -51,6 +52,43 @@ export interface PathStep {
   node: string;
   via?: string;
   weight: number;
+}
+
+/** One alternative for a handle that did not resolve uniquely. */
+export interface ResolveCandidate {
+  id: string;
+  title: string;
+  type: string;
+  degree: number;
+  /** Content identity - see {@link GraphStore.contentHash}. */
+  content_hash: string;
+  /** meta.provenance when stamped, else null (provenance contract). */
+  source: string | null;
+  updated_at: string;
+}
+
+/**
+ * The answer to "what does this handle point at?".
+ *
+ * Three outcomes stay apart on purpose: matched_by id (called by identity), title (one unique
+ * title hit), and everything else NOT resolved - ambiguous with candidates to choose from, or
+ * none with near-miss suggestions. A resolver that guesses turns "you passed the wrong handle"
+ * into "you silently got a different node", which is the failure this exists to prevent.
+ */
+export interface ResolveResult {
+  resolved: boolean;
+  id: string | null;
+  title: string | null;
+  matched_by: 'id' | 'title' | 'ambiguous' | 'none';
+  candidates: ResolveCandidate[];
+  /** Total alternatives when ambiguous (candidates is capped); 1 when resolved, 0 on a miss. */
+  total_candidates: number;
+  confidence: number;
+  source: string | null;
+  /** Content hash of the resolved node; null when nothing resolved. */
+  hash: string | null;
+  /** Other live ids carrying the same title - the same knowledge stored twice. */
+  duplicates: string[];
 }
 
 // ---------- constants ----------
@@ -962,6 +1000,78 @@ export class GraphStore {
       + 'WHERE n.deleted_at IS NULL ORDER BY degree DESC, n.updated_at DESC LIMIT ?'
     ).all(limit) as { title: string; degree: number }[];
     return rows;
+  }
+
+  /**
+   * Content identity: sha1 over normalized title+content, 16 hex chars (the same width the session
+   * importer stamps as import_hash). Two ids with the same hash are the same knowledge; a hash that
+   * CHANGED under one id means the note was rewritten, which no id can tell you.
+   */
+  contentHash(n: { title: string; content?: string }): string {
+    return createHash('sha1').update(String(n.title) + '\u0000' + String(n.content ?? '')).digest('hex').slice(0, 16);
+  }
+
+  private candidateOf(n: NodeRecord): ResolveCandidate {
+    return {
+      id: n.id,
+      title: n.title,
+      type: n.type,
+      degree: this.degreeOf(n.id),
+      content_hash: this.contentHash(n),
+      source: (n.meta?.provenance as string) ?? null,
+      updated_at: n.updated_at,
+    };
+  }
+
+  private resolveHit(n: NodeRecord, matchedBy: 'id' | 'title', confidence: number): ResolveResult {
+    const dups = this.db.prepare(
+      'SELECT id FROM nodes WHERE title = ? COLLATE NOCASE AND id <> ? AND deleted_at IS NULL LIMIT 20'
+    ).all(n.title, n.id) as { id: string }[];
+    return {
+      resolved: true, id: n.id, title: n.title, matched_by: matchedBy, candidates: [],
+      total_candidates: 1, confidence,
+      source: (n.meta?.provenance as string) ?? null,
+      hash: this.contentHash(n), duplicates: dups.map(d => d.id),
+    };
+  }
+
+  /**
+   * Resolve a handle that may be an ID **or** a title. Exact id wins; an exact title (case-insensitive,
+   * whitespace-normalized like addNode) resolves only when it is UNIQUE; several hits come back as
+   * candidates with nothing resolved; no exact hit returns substring suggestions under matched_by
+   * 'none'. Never guesses a near-match: a wrong handle must not quietly become a different node.
+   */
+  resolveHandle(handle: string, limit = 10): ResolveResult {
+    const h = String(handle ?? '').replace(/\s+/g, ' ').trim();
+    const miss = (extra: Partial<ResolveResult> = {}): ResolveResult => ({
+      resolved: false, id: null, title: null, matched_by: 'none', candidates: [],
+      total_candidates: 0, confidence: 0, source: null, hash: null, duplicates: [], ...extra,
+    });
+    if (!h) return miss();
+
+    const direct = this.getNode(h);
+    if (direct) return this.resolveHit(direct, 'id', 1);
+
+    const rows = this.db.prepare(
+      'SELECT * FROM nodes WHERE title = ? COLLATE NOCASE AND deleted_at IS NULL ORDER BY updated_at DESC'
+    ).all(h) as Record<string, unknown>[];
+    if (rows.length === 1) return this.resolveHit(this.rowToNode(rows[0]), 'title', 0.95);
+    if (rows.length > 1) {
+      // Several nodes share the title: hand back the choice instead of picking one.
+      return miss({ matched_by: 'ambiguous', total_candidates: rows.length,
+        candidates: rows.slice(0, Math.max(1, limit)).map(r => this.candidateOf(this.rowToNode(r))) });
+    }
+
+    // Nothing exact. Substring near-misses are SUGGESTIONS (resolved stays false) so the caller sees
+    // what the graph has instead of only "not found".
+    const like = '%' + h.replace(/[\\%_]/g, (m) => '\\' + m) + '%';
+    const total = Number((this.db.prepare(
+      "SELECT COUNT(*) AS c FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ESCAPE '\\'"
+    ).get(like) as { c: number }).c);
+    const near = this.db.prepare(
+      "SELECT * FROM nodes WHERE deleted_at IS NULL AND title LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?"
+    ).all(like, Math.max(1, limit)) as Record<string, unknown>[];
+    return miss({ total_candidates: total, candidates: near.map(r => this.candidateOf(this.rowToNode(r))) });
   }
 
   stats(): { nodes: number; edges: number; snapshots: number } {

@@ -110,6 +110,15 @@ export declare function subgraphOf(args: {
     edges: EdgeRecord[];
     seedFound: boolean;
 };
+/**
+ * Turn a handle (id OR title) into a node - or into an honest refusal plus the choices.
+ * The traversal tools (neighbors/related/context/paths) take IDs only and report `unknown_id` for
+ * anything else; this is the one place that also accepts a title, and it never guesses.
+ */
+export declare function resolveNode(args: {
+    handle: string;
+    limit?: number;
+}): import("./graph.ts").ResolveResult;
 export declare function searchVector(args: {
     q: string;
     topK?: number;

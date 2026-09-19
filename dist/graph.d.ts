@@ -43,6 +43,41 @@ export interface PathStep {
     via?: string;
     weight: number;
 }
+/** One alternative for a handle that did not resolve uniquely. */
+export interface ResolveCandidate {
+    id: string;
+    title: string;
+    type: string;
+    degree: number;
+    /** Content identity - see {@link GraphStore.contentHash}. */
+    content_hash: string;
+    /** meta.provenance when stamped, else null (provenance contract). */
+    source: string | null;
+    updated_at: string;
+}
+/**
+ * The answer to "what does this handle point at?".
+ *
+ * Three outcomes stay apart on purpose: matched_by id (called by identity), title (one unique
+ * title hit), and everything else NOT resolved - ambiguous with candidates to choose from, or
+ * none with near-miss suggestions. A resolver that guesses turns "you passed the wrong handle"
+ * into "you silently got a different node", which is the failure this exists to prevent.
+ */
+export interface ResolveResult {
+    resolved: boolean;
+    id: string | null;
+    title: string | null;
+    matched_by: 'id' | 'title' | 'ambiguous' | 'none';
+    candidates: ResolveCandidate[];
+    /** Total alternatives when ambiguous (candidates is capped); 1 when resolved, 0 on a miss. */
+    total_candidates: number;
+    confidence: number;
+    source: string | null;
+    /** Content hash of the resolved node; null when nothing resolved. */
+    hash: string | null;
+    /** Other live ids carrying the same title - the same knowledge stored twice. */
+    duplicates: string[];
+}
 export declare function nowIso(): string;
 /** Normalization contract (LightRAG insert_custom_kg): trim + collapse whitespace + case fold. */
 export declare function normalizeName(s: string): string;
@@ -259,6 +294,24 @@ export declare class GraphStore {
         title: string;
         degree: number;
     }[];
+    /**
+     * Content identity: sha1 over normalized title+content, 16 hex chars (the same width the session
+     * importer stamps as import_hash). Two ids with the same hash are the same knowledge; a hash that
+     * CHANGED under one id means the note was rewritten, which no id can tell you.
+     */
+    contentHash(n: {
+        title: string;
+        content?: string;
+    }): string;
+    private candidateOf;
+    private resolveHit;
+    /**
+     * Resolve a handle that may be an ID **or** a title. Exact id wins; an exact title (case-insensitive,
+     * whitespace-normalized like addNode) resolves only when it is UNIQUE; several hits come back as
+     * candidates with nothing resolved; no exact hit returns substring suggestions under matched_by
+     * 'none'. Never guesses a near-match: a wrong handle must not quietly become a different node.
+     */
+    resolveHandle(handle: string, limit?: number): ResolveResult;
     stats(): {
         nodes: number;
         edges: number;

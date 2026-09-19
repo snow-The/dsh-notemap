@@ -1,4 +1,24 @@
 
+## 0.13.0
+- feat(tools): `notemap_resolve` — a handle may be an ID **or** a title, and the answer says HOW it
+  matched: `matched_by: id | title | ambiguous | none`. Exact id wins (confidence 1); a unique exact
+  title resolves (0.95, case-insensitive, whitespace-normalized like `addNode`); several nodes
+  sharing a title come back as `candidates` with `resolved: false`; nothing exact returns substring
+  near-misses under `matched_by: none`. It never guesses: an implicit title fallback inside the
+  traversal tools would turn "you passed the wrong handle" into "you silently got a different node",
+  which is the failure the whole contract exists to prevent. The rescue lives here, explicitly
+  - `hash` is a content identity — sha1(title + NUL + content), 16 hex — so the same note stored
+    under two ids is visibly one note (`duplicates` names them), and a rewritten note changes its
+    hash. An id alone can tell you neither fact
+  - `source` carries `meta.provenance`, so a resolve answer already says whether the node is
+    `agent_authored`, `session_derived` or `external_source`
+- doc(tools): `notemap_neighbors` / `related` / `paths` / `context` now say they take IDs and name
+  the tool that turns a title into one — the missing-handle path had no documented recovery
+- test: four conformance cases (id beats a title that looks like an id; a shared title resolves to
+  nothing and returns both candidates, with `total_candidates` honest when the list is capped; a
+  substring SUGGESTS and stays `resolved: false`; hash equality across ids and hash change after a
+  rewrite). Each was mutation-checked: making the ambiguous branch pick a row, labelling a miss as a
+  title match, or hashing the title alone turns exactly one case red. 37/37
 ## 0.12.1
 - fix(context): `notemap_context` now returns `seedFound`. An unresolved seed used to be
   indistinguishable from a resolved one with no neighbours — both returned `{ nodes: [], edges: [] }`
