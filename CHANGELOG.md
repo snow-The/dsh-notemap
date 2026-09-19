@@ -1,4 +1,17 @@
 
+## 0.14.0
+- feat(signals): a degenerate retrieval answer is now RECORDED — one JSONL row per CUT list or
+  UNRESOLVED handle in `<DSH_HOME>/notemap-retrieval.jsonl` (`DSH_NOTEMAP_RETRIEVAL` overrides),
+  carrying `{ts, session, tool, total, returned, truncated, unknown_id}`. A clean answer is
+  deliberately NOT recorded: recording every call would make the rate meaningless, and the journal
+  exists for the exception
+  - written by ONE wrapper around tool registration (the only place the tool name is known), not by
+    nine handlers, so no future list tool can forget it
+  - the reader is `dsh-session-handoff`'s `acp_status`, which prints it as the L4 layer (proposal
+    A/B; 31057 Tab.4). The default path is the contract, and it is verified cross-plugin, not by
+    two files that merely look alike
+- test: a truncated answer and an unresolved handle each write a row (with the envelope's own
+  numbers); a clean answer writes none. 38/38
 ## 0.13.0
 - feat(tools): `notemap_resolve` — a handle may be an ID **or** a title, and the answer says HOW it
   matched: `matched_by: id | title | ambiguous | none`. Exact id wins (confidence 1); a unique exact

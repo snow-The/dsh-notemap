@@ -9,7 +9,7 @@
 // A test that only imports src/graph.ts never sees either half of that seam.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,6 +18,7 @@ import { join } from 'node:path';
 const dir = mkdtempSync(join(tmpdir(), 'notemap-tools-'));
 process.env.DSH_DATA_DIR = dir;
 process.env.DSH_NOTEMAP_DB = join(dir, 'g.db');
+process.env.DSH_NOTEMAP_RETRIEVAL = join(dir, 'retrieval.jsonl');
 
 const { apply } = await import('../src/index.ts');
 const { getStore } = await import('../src/notemap.ts');
@@ -264,6 +265,30 @@ test('resolve: the hash is a content identity, so two ids read as one note', asy
   await tools.get('notemap_add').execute({ id: added.id, title: 'hash probe', content: 'v2' }, {});
   const h2 = (await tools.get('notemap_resolve').execute({ handle: added.id }, {})).hash;
   assert.notEqual(h1, h2, 'a rewritten note must not keep its old content identity');
+});
+
+test('retrieval signals: a degenerate answer is recorded, a clean one is not', async () => {
+  const jp = process.env.DSH_NOTEMAP_RETRIEVAL;
+  assert.ok(jp, 'the suite must point the signal journal at a temp file, never the real one');
+  const read = () => (existsSync(jp) ? readFileSync(jp, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+
+  const before = read().length;
+  const clean = await tools.get('notemap_neighbors').execute({ id: 'zig-1' }, {});
+  assert.equal(clean.truncated, false);
+  assert.equal(read().length, before, 'a clean answer is not a signal - recording every call would make the rate meaningless');
+
+  await tools.get('notemap_neighbors').execute({ id: 'zig-1', limit: 1 }, {});
+  await tools.get('notemap_neighbors').execute({ id: 'definitely-not-a-node' }, {});
+  const rows = read().slice(before);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.tool), ['notemap_neighbors', 'notemap_neighbors']);
+  assert.equal(rows[0].truncated, true);
+  assert.equal(rows[0].unknown_id, null);
+  assert.equal(rows[0].total, 2);
+  assert.equal(rows[0].returned, 1);
+  assert.equal(rows[1].unknown_id, 'definitely-not-a-node');
+  assert.equal(rows[1].truncated, false);
+  assert.ok(rows.every((r) => typeof r.ts === "number" && r.v === 1));
 });
 
 after(() => {

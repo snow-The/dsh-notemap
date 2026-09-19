@@ -1,4 +1,7 @@
 import { defineTool as dshDefineTool } from '@deepseek-ai/dsh-tools';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 // dsh-tools now requires options.output and the property-map parameters DSL;
 // convert legacy JSON-Schema style parameters and default open JSON output.
 const defineTool = (o: any) => {
@@ -298,9 +301,51 @@ export async function importSessions(opts?: { limit?: number; maxLines?: number;
   return { scanned: files.length, sessions, checkpoints, events, assistants, skipped, imported };
 }
 
+/**
+ * Retrieval signals - the write side of L4 (proposal B, 31057 Tab.4).
+ *
+ * A degenerate answer (the list was CUT, or the handle did not resolve) is the only retrieval
+ * event we can measure without a reward label, and it is what a budget policy would key on. It is
+ * recorded here, in ONE place where the tool name is known, rather than at nine call sites; a clean
+ * answer is deliberately NOT recorded, so the journal can never be inflated into a fake signal rate.
+ *
+ * The path is a shared file contract with dsh-session-handoff, whose acp_status reads it back as the
+ * L4 layer: <DSH_HOME>/notemap-retrieval.jsonl (DSH_NOTEMAP_RETRIEVAL overrides it).
+ */
+export function retrievalJournalPath(): string {
+  return process.env.DSH_NOTEMAP_RETRIEVAL ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'notemap-retrieval.jsonl');
+}
+
+/** Append one signal. NEVER throws: a measurement is not worth breaking the answer it describes. */
+export function recordRetrievalSignal(tool: string, value: unknown, exec?: { agent?: { session?: { id?: string } } }): boolean {
+  try {
+    const v = value as { items?: unknown; total?: unknown; returned?: unknown; truncated?: unknown; unknown_id?: unknown } | null;
+    if (v == null || typeof v !== 'object' || !Array.isArray(v.items)) return false;
+    const unknown = v.unknown_id == null || v.unknown_id === '' ? null : String(v.unknown_id);
+    const truncated = v.truncated === true;
+    if (!truncated && unknown == null) return false;
+    appendFileSync(retrievalJournalPath(), JSON.stringify({
+      v: 1, ts: Date.now(), session: exec?.agent?.session?.id ?? null, tool,
+      total: typeof v.total === 'number' ? v.total : null,
+      returned: typeof v.returned === 'number' ? v.returned : null,
+      truncated, unknown_id: unknown,
+    }) + '\n');
+    return true;
+  } catch { return false; }
+}
 export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): void {
-  const reg = ctx.tools?.register?.bind(ctx.tools);
-  if (!reg) return;
+  const register = ctx.tools?.register?.bind(ctx.tools);
+  if (!register) return;
+  // One wrapper, one owner: every list answer passes through here, so a signal is recorded where
+  // the tool name is known and no handler has to remember to do it.
+  const reg = (def: any) => register({
+    ...def,
+    execute: async (args: any, exec: any) => {
+      const value = await def.execute(args, exec);
+      recordRetrievalSignal(def.name, value, exec);
+      return value;
+    },
+  });
 
   reg(defineTool({
     name: 'notemap_add',

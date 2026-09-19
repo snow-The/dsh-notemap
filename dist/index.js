@@ -1,5 +1,8 @@
 // src/index.ts
 import { defineTool as dshDefineTool } from "@deepseek-ai/dsh-tools";
+import { appendFileSync } from "node:fs";
+import { join as join4 } from "node:path";
+import { homedir as homedir3 } from "node:os";
 
 // src/graph.ts
 import { DatabaseSync } from "node:sqlite";
@@ -1675,11 +1678,11 @@ async function importSessions(opts) {
   const { execFileSync } = await import("node:child_process");
   const { readdirSync, statSync, readFileSync } = await import("node:fs");
   const { zstdDecompressSync } = await import("node:zlib");
-  const { join: join4 } = await import("node:path");
-  const { homedir: homedir3 } = await import("node:os");
+  const { join: join5 } = await import("node:path");
+  const { homedir: homedir4 } = await import("node:os");
   const { createHash: createHash2 } = await import("node:crypto");
   const hash = (s) => createHash2("sha1").update(s).digest("hex").slice(0, 16);
-  const root = opts?.sessionsDir ?? join4(homedir3(), ".dsh", "sessions");
+  const root = opts?.sessionsDir ?? join5(homedir4(), ".dsh", "sessions");
   const files = [];
   const byDir = /* @__PURE__ */ new Map();
   const walk = (dir) => {
@@ -1690,7 +1693,7 @@ async function importSessions(opts) {
       return;
     }
     for (const name2 of entries) {
-      const p = join4(dir, name2);
+      const p = join5(dir, name2);
       try {
         if (statSync(p).isDirectory()) {
           walk(p);
@@ -1846,9 +1849,42 @@ async function importSessions(opts) {
   }
   return { scanned: files.length, sessions, checkpoints, events, assistants, skipped, imported };
 }
+function retrievalJournalPath() {
+  return process.env.DSH_NOTEMAP_RETRIEVAL ?? join4(process.env.DSH_HOME ?? join4(homedir3(), ".dsh"), "notemap-retrieval.jsonl");
+}
+function recordRetrievalSignal(tool, value, exec) {
+  try {
+    const v = value;
+    if (v == null || typeof v !== "object" || !Array.isArray(v.items)) return false;
+    const unknown = v.unknown_id == null || v.unknown_id === "" ? null : String(v.unknown_id);
+    const truncated = v.truncated === true;
+    if (!truncated && unknown == null) return false;
+    appendFileSync(retrievalJournalPath(), JSON.stringify({
+      v: 1,
+      ts: Date.now(),
+      session: exec?.agent?.session?.id ?? null,
+      tool,
+      total: typeof v.total === "number" ? v.total : null,
+      returned: typeof v.returned === "number" ? v.returned : null,
+      truncated,
+      unknown_id: unknown
+    }) + "\n");
+    return true;
+  } catch {
+    return false;
+  }
+}
 function apply(ctx) {
-  const reg = ctx.tools?.register?.bind(ctx.tools);
-  if (!reg) return;
+  const register = ctx.tools?.register?.bind(ctx.tools);
+  if (!register) return;
+  const reg = (def) => register({
+    ...def,
+    execute: async (args, exec) => {
+      const value = await def.execute(args, exec);
+      recordRetrievalSignal(def.name, value, exec);
+      return value;
+    }
+  });
   reg(defineTool({
     name: "notemap_add",
     description: "Add a note node to the networked knowledge graph (dsh-notemap). Returns the created node.",
@@ -2246,5 +2282,7 @@ export {
   dispose,
   importSessions,
   inject,
-  name
+  name,
+  recordRetrievalSignal,
+  retrievalJournalPath
 };
