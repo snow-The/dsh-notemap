@@ -259,22 +259,29 @@ export declare class GraphStore {
         meta?: Record<string, unknown>;
     }[]): number;
     /**
-     * The subgraph around one seed, with {@link seedFound} saying whether the seed resolved.
+     * The subgraph around one seed, with `unknown_id` naming the seed when it did not resolve.
      *
      * An unresolved seed used to be indistinguishable from a resolved one with no neighbours: both
      * returned `{ nodes: [], edges: [] }`. `seed` is an ID, and a caller who passes a TITLE — which
      * `notemap_search` will happily hand back, since it matches titles — got a confident empty answer
      * with nothing in it to say the lookup had failed. Both results are legitimate; only one of them
-     * answers the question that was asked, and before this flag the caller could not tell which.
+     * answers the question that was asked.
      *
-     * A flag rather than an `error`: an unknown seed is a valid answer to "what is around this node",
-     * not a failure, and reusing the error channel for it would make every caller's error handling
-     * wrong in the same direction.
+     * `unknown_id` and NOT a flag of its own (this first shipped as `seedFound`). The flag worked, but
+     * it invented a second name for a fact this plugin had already designed one for: the list envelope
+     * carries `unknown_id: string | null`, `findPaths`/`findRelated` already report an unresolvable
+     * handle that way, and the retrieval journal records THAT field — so a tool answering in its own
+     * vocabulary is invisible to the signal it was built to feed. The envelope's field is also strictly
+     * more informative: it says WHICH handle failed, not only that one did.
+     *
+     * A returned field rather than an `error`: an unknown seed is a valid answer to "what is around
+     * this node", not a failure, and reusing the error channel for it would make every caller's error
+     * handling wrong in the same direction.
      */
     subgraph(seed: string, maxDepth?: number, maxNodes?: number): {
         nodes: NodeRecord[];
         edges: EdgeRecord[];
-        seedFound: boolean;
+        unknown_id: string | null;
     };
     /**
      * Substring match over titles, in the SAME shape as {@link popularLabels}.

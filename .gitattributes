@@ -1,0 +1,10 @@
+# Line endings had two owners and neither said so: core.autocrlf=true on this machine, no
+# .gitattributes in the repo. Git compares CRLF and LF as EQUAL, so nothing looks wrong - but a
+# multi-line edit cannot match its own anchor against a CRLF file, because the anchor is written
+# with LF. Measured cost in one sitting: four failed edits in src/index.ts, one of which had
+# ALREADY APPLIED before the failure was reported (three declarations of the same const, and a tsc
+# error pointing at the duplicates instead of the cause). Recovery was `git checkout`, which would
+# have discarded any uncommitted work in that file.
+#
+# One owner: LF in the index and in the working tree, on every platform.
+* text=auto eol=lf

@@ -196,20 +196,32 @@ test('a pathless pair is an empty array, never null', async () => {
   assert.equal(p.unknown_id, 'no-a', 'and the envelope names the handle that did not resolve');
 });
 
-test('an unresolved seed is REPORTED, not returned as a valid empty subgraph', async () => {
-  // The last silent-empty answer in the plugin. 'seed' is an id, but notemap_search matches TITLES,
-  // so a caller can very reasonably pass one back - and got { nodes: [], edges: [] }, which is also
-  // the correct answer for a real node with no neighbours. Two different facts, one output.
+test('an unresolved seed speaks the envelope vocabulary, and reaches the journal', async () => {
+  // It shipped as a flag of its own (`seedFound`). The flag worked, but it named a fact this plugin
+  // had already named: the envelope carries `unknown_id`, findPaths/findRelated report unresolvable
+  // handles that way, and the retrieval journal records THAT field. One name for one fact - and a
+  // tool answering in its own vocabulary is invisible to the signal it was built to feed.
+  const jp = process.env.DSH_NOTEMAP_RETRIEVAL;
+  const read = () => (existsSync(jp) ? readFileSync(jp, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  const before = read().length;
+
   const byTitle = await tools.get('notemap_context').execute({ seed: 'zig compiler notes', maxDepth: 1 }, {});
-  assert.equal(byTitle.seedFound, false, 'a title is not an id, and the caller must be able to see that');
-  assert.deepEqual(byTitle.nodes, [], 'and it still returns a well-formed empty subgraph');
+  assert.equal(byTitle.unknown_id, 'zig compiler notes', 'the seed that did not resolve is NAMED');
+  assert.equal(byTitle.seedFound, undefined, 'and there is no second name for the same fact');
+  assert.deepEqual(byTitle.nodes, [], 'still a well-formed empty subgraph - not an error');
 
   const real = await tools.get('notemap_context').execute({ seed: 'zig-1', maxDepth: 1 }, {});
-  assert.equal(real.seedFound, true);
+  assert.equal(real.unknown_id, null, 'a resolved seed names nothing');
   assert.ok(real.nodes.length >= 3, 'zig-1 reaches r32-1 and misc-1 within one hop');
+  assert.notEqual(byTitle.unknown_id, real.unknown_id, 'the distinction is the whole fix');
 
-  // The distinction is the whole fix, so assert it as one:
-  assert.notEqual(byTitle.seedFound, real.seedFound);
+  // Renaming alone would NOT have been enough: a subgraph has no `items`, so the envelope branch in
+  // recordRetrievalSignal cannot see it. The shape needed a branch of its own, or the vocabulary
+  // would have matched while the journal stayed blind.
+  const rows = read().slice(before);
+  assert.equal(rows.length, 1, 'exactly one signal: the miss, not the resolved call');
+  assert.equal(rows[0].kind, 'graph');
+  assert.equal(rows[0].unknown_id, 'zig compiler notes');
 });
 
 test('resolve: a title is a valid handle, and an id still wins', async () => {

@@ -51,6 +51,20 @@ const listOut = (items: Record<string, unknown> = { type: 'object', additionalPr
  * "did this resolve, and if not, what were the choices" - `total_candidates` keeps the same
  * honesty as the envelope when the candidate list itself is capped.
  */
+/**
+ * Output contract for notemap_context. A subgraph is NOT a list envelope: when the graph IS the
+ * answer there is no `total` to be honest about, so `listOut` does not fit. What it shares with the
+ * envelope is the VOCABULARY - `unknown_id` names the seed that did not resolve.
+ */
+const graphOut = {
+  schema: { type: 'object', additionalProperties: true, properties: {
+    nodes: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    edges: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    unknown_id: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+  } },
+  render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) }],
+};
+
 const resolveOut = {
   schema: {
     type: 'object', additionalProperties: true,
@@ -321,7 +335,7 @@ export function recordRetrievalSignal(tool: string, value: unknown, exec?: { age
   try {
     const v = value as {
       items?: unknown; total?: unknown; returned?: unknown; truncated?: unknown; unknown_id?: unknown;
-      resolved?: unknown; matched_by?: unknown; total_candidates?: unknown;
+      resolved?: unknown; matched_by?: unknown; total_candidates?: unknown; nodes?: unknown;
     } | null;
     if (v == null || typeof v !== 'object') return false;
     const write = (body: Record<string, unknown>) => {
@@ -343,6 +357,14 @@ export function recordRetrievalSignal(tool: string, value: unknown, exec?: { age
     // it used to be excluded by the envelope check above, which made a miss invisible.
     if (v.resolved === false) {
       return write({ kind: 'resolve', resolved: false, matched_by: String(v.matched_by ?? 'none'), total_candidates: num(v.total_candidates) });
+    }
+    // Shape 3: a subgraph answer. A graph is NOT a list envelope - there is no `total` to be honest
+    // about when the graph IS the answer - so the check above cannot see it. That is precisely how an
+    // unresolved seed would have stayed invisible even after it was renamed to `unknown_id`: the
+    // vocabulary would have matched while the SHAPE kept it out of the journal.
+    if (v.unknown_id != null && v.unknown_id !== '') {
+      const nodes = Array.isArray(v.nodes) ? v.nodes.length : null;
+      return write({ kind: 'graph', unknown_id: String(v.unknown_id), nodes });
     }
     return false;
   } catch { return false; }
@@ -380,16 +402,17 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
 
   reg(defineTool({
     name: 'notemap_context',
-    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.',
+    description: 'Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one comes back as an empty subgraph with unknown_id naming the seed (never an error), so check that field before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.',
     parameters: {
       type: 'object',
       properties: {
-        seed: { type: 'string', description: 'Seed node ID (not a title — an unknown id returns seedFound: false)' },
+        seed: { type: 'string', description: 'Seed node ID. A title will NOT resolve - notemap_resolve turns one into an ID; a miss is reported in unknown_id' },
         maxDepth: { type: 'number', description: 'Max hop depth (default 2)' },
         maxNodes: { type: 'number', description: 'Max nodes to collect (default 50)' },
       },
       required: ['seed'],
     },
+    output: graphOut,
     execute: (args: { seed: string; maxDepth?: number; maxNodes?: number }) => subgraphOf(args),
   }));
 

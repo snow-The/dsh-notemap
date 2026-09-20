@@ -764,17 +764,24 @@ var GraphStore = class {
   }
   // ---------- subgraph extraction (LightRAG get_knowledge_graph) ----------
   /**
-   * The subgraph around one seed, with {@link seedFound} saying whether the seed resolved.
+   * The subgraph around one seed, with `unknown_id` naming the seed when it did not resolve.
    *
    * An unresolved seed used to be indistinguishable from a resolved one with no neighbours: both
    * returned `{ nodes: [], edges: [] }`. `seed` is an ID, and a caller who passes a TITLE — which
    * `notemap_search` will happily hand back, since it matches titles — got a confident empty answer
    * with nothing in it to say the lookup had failed. Both results are legitimate; only one of them
-   * answers the question that was asked, and before this flag the caller could not tell which.
+   * answers the question that was asked.
    *
-   * A flag rather than an `error`: an unknown seed is a valid answer to "what is around this node",
-   * not a failure, and reusing the error channel for it would make every caller's error handling
-   * wrong in the same direction.
+   * `unknown_id` and NOT a flag of its own (this first shipped as `seedFound`). The flag worked, but
+   * it invented a second name for a fact this plugin had already designed one for: the list envelope
+   * carries `unknown_id: string | null`, `findPaths`/`findRelated` already report an unresolvable
+   * handle that way, and the retrieval journal records THAT field — so a tool answering in its own
+   * vocabulary is invisible to the signal it was built to feed. The envelope's field is also strictly
+   * more informative: it says WHICH handle failed, not only that one did.
+   *
+   * A returned field rather than an `error`: an unknown seed is a valid answer to "what is around
+   * this node", not a failure, and reusing the error channel for it would make every caller's error
+   * handling wrong in the same direction.
    */
   subgraph(seed, maxDepth = 2, maxNodes = 50) {
     const visited = /* @__PURE__ */ new Set([seed]);
@@ -783,7 +790,7 @@ var GraphStore = class {
     const nodeList = [];
     const edgeList = [];
     const seedNode = this.getNode(seed);
-    const seedFound = seedNode !== null;
+    const unknownId = seedNode === null ? seed : null;
     if (seedNode) nodeList.push(seedNode);
     while (queue.length > 0 && nodeList.length < maxNodes) {
       const [cur, depth] = queue.shift();
@@ -803,7 +810,7 @@ var GraphStore = class {
         }
       }
     }
-    return { nodes: nodeList, edges: edgeList, seedFound };
+    return { nodes: nodeList, edges: edgeList, unknown_id: unknownId };
   }
   // ---------- labels (LightRAG search_labels / get_popular_labels) ----------
   /**
@@ -1631,6 +1638,14 @@ var listOut = (items = { type: "object", additionalProperties: true }) => ({
   },
   render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
 });
+var graphOut = {
+  schema: { type: "object", additionalProperties: true, properties: {
+    nodes: { type: "array", items: { type: "object", additionalProperties: true } },
+    edges: { type: "array", items: { type: "object", additionalProperties: true } },
+    unknown_id: { oneOf: [{ type: "string" }, { type: "null" }] }
+  } },
+  render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) }]
+};
 var resolveOut = {
   schema: {
     type: "object",
@@ -1876,6 +1891,10 @@ function recordRetrievalSignal(tool, value, exec) {
     if (v.resolved === false) {
       return write({ kind: "resolve", resolved: false, matched_by: String(v.matched_by ?? "none"), total_candidates: num2(v.total_candidates) });
     }
+    if (v.unknown_id != null && v.unknown_id !== "") {
+      const nodes = Array.isArray(v.nodes) ? v.nodes.length : null;
+      return write({ kind: "graph", unknown_id: String(v.unknown_id), nodes });
+    }
     return false;
   } catch {
     return false;
@@ -1910,16 +1929,17 @@ function apply(ctx) {
   }));
   reg(defineTool({
     name: "notemap_context",
-    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one returns an empty subgraph with seedFound: false rather than an error, so check that flag before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.",
+    description: "Extract the subgraph around a seed node up to N hops (LightRAG get_knowledge_graph style). Returns nodes + edges, ready for downstream reasoning. The seed must be a node ID: an unknown one comes back as an empty subgraph with unknown_id naming the seed (never an error), so check that field before concluding the node has no neighbours. A title is not an ID: run it through notemap_resolve first.",
     parameters: {
       type: "object",
       properties: {
-        seed: { type: "string", description: "Seed node ID (not a title \u2014 an unknown id returns seedFound: false)" },
+        seed: { type: "string", description: "Seed node ID. A title will NOT resolve - notemap_resolve turns one into an ID; a miss is reported in unknown_id" },
         maxDepth: { type: "number", description: "Max hop depth (default 2)" },
         maxNodes: { type: "number", description: "Max nodes to collect (default 50)" }
       },
       required: ["seed"]
     },
+    output: graphOut,
     execute: (args) => subgraphOf(args)
   }));
   reg(defineTool({

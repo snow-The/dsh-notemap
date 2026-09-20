@@ -1,7 +1,21 @@
 
 ## 0.14.0
-- feat(signals): a degenerate retrieval answer is now RECORDED — one JSONL row per CUT list or
-  UNRESOLVED handle in `<DSH_HOME>/notemap-retrieval.jsonl` (`DSH_NOTEMAP_RETRIEVAL` overrides),
+## 0.15.0
+- fix(context): `notemap_context` now reports **`unknown_id`** (the seed that did not resolve, else `null`)
+  instead of a `seedFound` flag of its own. The flag worked and was verified live — but it was a second
+  name for a fact this plugin had already named: the list envelope carries `unknown_id`,
+  `findPaths`/`findRelated` already report unresolvable handles that way, and the retrieval journal
+  records THAT field. A tool answering in its own vocabulary is invisible to the signal it was built to
+  feed. (Raised in an independent report, `OC/docs/bug-notemap-output-schema.md`.)
+- fix(signals): and renaming alone would NOT have been enough — a subgraph has no `items`, so the
+  envelope branch in `recordRetrievalSignal` could not see it either way. Added the third shape
+  (`kind: "graph"`), so an unresolved seed finally reaches the journal. Mutation-checked: dropping that
+  branch, or comparing the seed against `undefined` instead of `null`, turns exactly one case red
+- build(.gitattributes): `* text=auto eol=lf` + normalization of the five files that were CRLF in the
+  working tree. Measured cost of the split: four multi-line edits to `src/index.ts` failed against a
+  file that reads normally, one of them AFTER it had applied (three declarations of one const, and a
+  `tsc` error pointing at the duplicates rather than the cause). Git compares CRLF and LF as equal, so
+  nothing looked wrong. 38/38
   carrying `{ts, session, tool, total, returned, truncated, unknown_id}`. A clean answer is
   deliberately NOT recorded: recording every call would make the rate meaningless, and the journal
   exists for the exception

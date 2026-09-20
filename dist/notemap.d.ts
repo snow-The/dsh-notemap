@@ -108,7 +108,7 @@ export declare function subgraphOf(args: {
 }): {
     nodes: NodeRecord[];
     edges: EdgeRecord[];
-    seedFound: boolean;
+    unknown_id: string | null;
 };
 /**
  * Turn a handle (id OR title) into a node - or into an honest refusal plus the choices.
