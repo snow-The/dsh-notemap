@@ -20,18 +20,51 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getStore } from './notemap.ts';
 import { betaConfidence, consensusBoost, recencyDecay } from './relations.ts';
+import {
+  acpGraphOr,
+  acpGraphPath,
+  acpGraphStatus,
+  withAcpGraph,
+  type AcpGraphStatus,
+} from './acp-graph-contract.ts';
 
 const LAYERS = ['soul', 'user', 'project', 'fact', 'lesson', 'topic', 'rules'] as const;
 
+/** notemap 自己的数据目录（本地图 + memory 层）。graph.db 的路径由契约拥有，见下。 */
 export function dshHome(): string {
   return process.env.DSH_DATA_DIR ?? process.env.DSH_HOME ?? join(homedir(), '.dsh');
 }
-export function acpGraphPath(): string { return join(dshHome(), 'graph', 'graph.db'); }
+/**
+ * graph.db 的规范路径。
+ *
+ * 注意这是【语义收窄】：旧实现把 dshHome() 同时用于本地图和 ACP 图，因此
+ * DSH_DATA_DIR 会一并改写 ACP 图的位置；契约固定用 DSH_HOME 解析 graph.db
+ * （生产者与 5 个消费方必须指向同一个文件，路径只能有一个所有者）。
+ * DSH_DATA_DIR 仍然只影响 notemap 自己的图（memoryDbPath 等）。
+ */
+export { acpGraphPath };
 export function memoryDbPath(): string { return join(dshHome(), 'memory', 'memory.db'); }
 
 /** Only the error path logs: an empty network must never look like a missing graph. */
 function warn(what: string, err: unknown): void {
   console.warn('[dsh-notemap] ' + what + ':', err instanceof Error ? err.message : String(err));
+}
+
+/** 最近一次 ACP 读取失败的原因（供诊断输出）；成功时为 null。 */
+let lastAcpProblem: { what: string; detail: string; status: AcpGraphStatus } | null = null;
+/**
+ * 'no-db' 不打日志：图不存在是预期内的降级（本文件头的老规矩——"absent by design,
+ * not an error"），状态由 acpGraphDiagnostics()/acpGraphStatusLine() 表达。
+ * 其余原因（形状不符/库更新/被锁）都是真故障，出声。
+ */
+function noteAcpProblem(what: string, detail: string, status: AcpGraphStatus): void {
+  lastAcpProblem = { what, detail, status };
+  if (status.reason === 'no-db') return;
+  console.warn('[dsh-notemap] ACP graph read failed (' + what + '):', detail, `(reason=${status.reason})`);
+}
+/** 诊断用：契约状态 + 最近一次失败原因（图"读不了"与"本来就空"必须能分辨）。 */
+export function acpGraphDiagnostics(): { status: AcpGraphStatus; lastProblem: { what: string; detail: string; status: AcpGraphStatus } | null } {
+  return { status: acpGraphStatus(), lastProblem: lastAcpProblem };
 }
 
 function openReadOnly(path: string): DatabaseSync | null {
@@ -100,8 +133,10 @@ export function buildNetwork(options: BuildOptions = {}): NetworkStats {
   const edgeRows: { source: string; target: string; type: string; weight: number; confidence: number; meta: Record<string, unknown> }[] = [];
 
   // ---------- half one: handoff's graph (collect / organise) ----------
-  const acp = openReadOnly(acpGraphPath());
-  if (acp !== null && tableExists(acp, 'nodes')) {
+  // 可读性由契约判定（版本戳 + v1 形状），不再由"文件能打开"隐式决定。主体保留自己的
+  // try/catch：一次部分失败仍然降级为"收集到多少算多少"，而不是整段丢弃。
+  const acpRead = withAcpGraph((acp) => {
+    if (!tableExists(acp, 'nodes')) return;
     stats.acp_available = true;
     try {
       const nodeCols = columnsOf(acp, 'nodes');
@@ -252,8 +287,10 @@ export function buildNetwork(options: BuildOptions = {}): NetworkStats {
           stats.edges++;
         }
       }
-    } catch { /* degrade: keep whatever was collected */ } finally { try { acp.close(); } catch { /* */ } }
-  }
+    } catch { /* degrade: keep whatever was collected */ }
+  });
+  // 读不了（不存在/形状不符/库更旧更新/被锁）必须与"图里没东西"区分开：记录原因。
+  if (!acpRead.ok) noteAcpProblem('network build', acpRead.detail, acpRead.status);
 
   // ---------- half two: memory's layers (process / use) ----------
   const mem = openReadOnly(memoryDbPath());
@@ -324,31 +361,32 @@ export function agentTree(): {
   session_id: string; agent_kind: string; cwd: string | null; parent: string | null;
   entities: number; mentions: number; checkpoints: number; children: string[];
 }[] {
-  const acp = openReadOnly(acpGraphPath());
-  if (acp === null || !tableExists(acp, 'sources')) return [];
-  try {
-    interface Row { id: number; session_id: string; parent_session?: string | null; agent_kind?: string; cwd?: string | null; entities?: number; mentions?: number; checkpoints?: number }
-    const rows = acp.prepare(`
-      SELECT s.id, s.session_id, s.parent_session, s.agent_kind, s.cwd,
-             (SELECT COUNT(DISTINCT m.node_id) FROM mentions m WHERE m.source_id = s.id) AS entities,
-             (SELECT COALESCE(SUM(m.count), 0) FROM mentions m WHERE m.source_id = s.id) AS mentions,
-             (SELECT COUNT(*) FROM checkpoints c WHERE c.session_id = s.session_id) AS checkpoints
-      FROM sources s`).all() as unknown as Row[];
-    const byId = new Map<string, ReturnType<typeof agentTree>[number]>();
-    for (const r of rows) {
-      byId.set(String(r.session_id), {
-        session_id: String(r.session_id), agent_kind: String(r.agent_kind ?? 'main'), cwd: r.cwd ?? null,
-        parent: r.parent_session === undefined || r.parent_session === null ? null : String(r.parent_session),
-        entities: Number(r.entities ?? 0), mentions: Number(r.mentions ?? 0),
-        checkpoints: Number(r.checkpoints ?? 0), children: [],
-      });
-    }
-    for (const entry of byId.values()) {
-      if (entry.parent === null) continue;
-      byId.get(entry.parent)?.children.push(entry.session_id);
-    }
-    return [...byId.values()].sort((a, b) => b.entities - a.entities);
-  } catch (err) { warn('agentTree query failed', err); return []; } finally { try { acp.close(); } catch { /* close is best effort */ } }
+  return acpGraphOr([], (acp) => {
+    if (!tableExists(acp, 'sources')) return [];
+    try {
+      interface Row { id: number; session_id: string; parent_session?: string | null; agent_kind?: string; cwd?: string | null; entities?: number; mentions?: number; checkpoints?: number }
+      const rows = acp.prepare(`
+        SELECT s.id, s.session_id, s.parent_session, s.agent_kind, s.cwd,
+               (SELECT COUNT(DISTINCT m.node_id) FROM mentions m WHERE m.source_id = s.id) AS entities,
+               (SELECT COALESCE(SUM(m.count), 0) FROM mentions m WHERE m.source_id = s.id) AS mentions,
+               (SELECT COUNT(*) FROM checkpoints c WHERE c.session_id = s.session_id) AS checkpoints
+        FROM sources s`).all() as unknown as Row[];
+      const byId = new Map<string, ReturnType<typeof agentTree>[number]>();
+      for (const r of rows) {
+        byId.set(String(r.session_id), {
+          session_id: String(r.session_id), agent_kind: String(r.agent_kind ?? 'main'), cwd: r.cwd ?? null,
+          parent: r.parent_session === undefined || r.parent_session === null ? null : String(r.parent_session),
+          entities: Number(r.entities ?? 0), mentions: Number(r.mentions ?? 0),
+          checkpoints: Number(r.checkpoints ?? 0), children: [],
+        });
+      }
+      for (const entry of byId.values()) {
+        if (entry.parent === null) continue;
+        byId.get(entry.parent)?.children.push(entry.session_id);
+      }
+      return [...byId.values()].sort((a, b) => b.entities - a.entities);
+    } catch (err) { warn('agentTree query failed', err); return []; }
+  }, (detail, status) => noteAcpProblem('agentTree', detail, status));
 }
 
 /**
@@ -360,61 +398,62 @@ export function consensusRecall(query: string, options: { limit?: number; k?: nu
   id: string; title: string; kind: string | null; score: number; sources: number;
   agent_kinds: string[]; sessions: string[]; mentions: number; confidence: number; recency: number; consensus: number;
 }[] {
-  const acp = openReadOnly(acpGraphPath());
-  if (acp === null || !tableExists(acp, 'nodes') || !tableExists(acp, 'mentions')) return [];
-  try {
-    interface Row { node_id: string; source_id: number; title: string; kind?: string; count?: number; session_id?: string; agent_kind?: string; last_seen?: number }
-    const rows = acp.prepare(`
-      SELECT m.node_id, m.source_id, n.title, n.kind, m.count, m.last_seen, s.session_id, s.agent_kind
-      FROM mentions m
-      JOIN nodes n ON n.id = m.node_id
-      LEFT JOIN sources s ON s.id = m.source_id
-      WHERE n.title LIKE ?`).all(`%${query}%`) as unknown as Row[];
-    const byId = new Map<string, Row[]>();
-    for (const r of rows) {
-      const list = byId.get(String(r.node_id));
-      if (list === undefined) byId.set(String(r.node_id), [r]); else list.push(r);
-    }
-    // one ranked list per source: entity ids ordered by that source's mention count
-    const perSource = new Map<number, Row[]>();
-    for (const list of byId.values()) {
-      for (const r of list) {
-        const arr = perSource.get(Number(r.source_id));
-        if (arr === undefined) perSource.set(Number(r.source_id), [r]); else arr.push(r);
+  return acpGraphOr([], (acp) => {
+    if (!tableExists(acp, 'nodes') || !tableExists(acp, 'mentions')) return [];
+    try {
+      interface Row { node_id: string; source_id: number; title: string; kind?: string; count?: number; session_id?: string; agent_kind?: string; last_seen?: number }
+      const rows = acp.prepare(`
+        SELECT m.node_id, m.source_id, n.title, n.kind, m.count, m.last_seen, s.session_id, s.agent_kind
+        FROM mentions m
+        JOIN nodes n ON n.id = m.node_id
+        LEFT JOIN sources s ON s.id = m.source_id
+        WHERE n.title LIKE ?`).all(`%${query}%`) as unknown as Row[];
+      const byId = new Map<string, Row[]>();
+      for (const r of rows) {
+        const list = byId.get(String(r.node_id));
+        if (list === undefined) byId.set(String(r.node_id), [r]); else list.push(r);
       }
-    }
-    const lists = [...perSource.values()].map((arr) => arr.sort((a, b) => Number(b.count ?? 1) - Number(a.count ?? 1)).map((r) => String(r.node_id)));
-    const fused = new Map<string, { score: number; sources: number[] }>();
-    lists.forEach((list, index) => {
-      list.forEach((id, rank) => {
-        const entry = fused.get(id) ?? { score: 0, sources: [] };
-        entry.score += 1 / ((options.k ?? 60) + rank + 1);
-        entry.sources.push(index);
-        fused.set(id, entry);
+      // one ranked list per source: entity ids ordered by that source's mention count
+      const perSource = new Map<number, Row[]>();
+      for (const list of byId.values()) {
+        for (const r of list) {
+          const arr = perSource.get(Number(r.source_id));
+          if (arr === undefined) perSource.set(Number(r.source_id), [r]); else arr.push(r);
+        }
+      }
+      const lists = [...perSource.values()].map((arr) => arr.sort((a, b) => Number(b.count ?? 1) - Number(a.count ?? 1)).map((r) => String(r.node_id)));
+      const fused = new Map<string, { score: number; sources: number[] }>();
+      lists.forEach((list, index) => {
+        list.forEach((id, rank) => {
+          const entry = fused.get(id) ?? { score: 0, sources: [] };
+          entry.score += 1 / ((options.k ?? 60) + rank + 1);
+          entry.sources.push(index);
+          fused.set(id, entry);
+        });
       });
-    });
-    const now = Date.now();
-    const results = [...fused.entries()].map(([id, entry]) => {
-      const list = byId.get(id) ?? [];
-      const first = list[0];
-      const distinct = new Set(entry.sources).size;
-      const mentions = list.reduce((sum, r) => sum + Number(r.count ?? 1), 0);
-      const lastSeen = Math.max(...list.map((r) => Number(r.last_seen ?? 0)));
-      const confidence = betaConfidence(mentions);
-      const recency = recencyDecay(lastSeen, now);
-      const consensus = 1 + Math.log(1 + distinct);
-      return {
-        id, title: String(first?.title ?? id), kind: first?.kind === undefined ? null : String(first.kind),
-        score: entry.score * consensus * confidence * recency, sources: distinct,
-        agent_kinds: [...new Set(list.map((r) => String(r.agent_kind ?? 'main')))],
-        sessions: [...new Set(list.map((r) => String(r.session_id ?? '?')))].slice(0, 5),
-        mentions, confidence, recency, consensus,
-      };
-    });
-    const minSources = options.minSources ?? 0;
-    return results
-      .filter((r) => r.sources >= minSources)
-      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
-      .slice(0, options.limit ?? 15);
-  } catch (err) { warn('consensus recall failed', err); return []; } finally { try { acp.close(); } catch { /* close is best effort */ } }
+      const now = Date.now();
+      const results = [...fused.entries()].map(([id, entry]) => {
+        const list = byId.get(id) ?? [];
+        const first = list[0];
+        const distinct = new Set(entry.sources).size;
+        const mentions = list.reduce((sum, r) => sum + Number(r.count ?? 1), 0);
+        const lastSeen = Math.max(...list.map((r) => Number(r.last_seen ?? 0)));
+        const confidence = betaConfidence(mentions);
+        const recency = recencyDecay(lastSeen, now);
+        const consensus = 1 + Math.log(1 + distinct);
+        return {
+          id, title: String(first?.title ?? id), kind: first?.kind === undefined ? null : String(first.kind),
+          score: entry.score * consensus * confidence * recency, sources: distinct,
+          agent_kinds: [...new Set(list.map((r) => String(r.agent_kind ?? 'main')))],
+          sessions: [...new Set(list.map((r) => String(r.session_id ?? '?')))].slice(0, 5),
+          mentions, confidence, recency, consensus,
+        };
+      });
+      const minSources = options.minSources ?? 0;
+      return results
+        .filter((r) => r.sources >= minSources)
+        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+        .slice(0, options.limit ?? 15);
+    } catch (err) { warn('consensus recall failed', err); return []; }
+  }, (detail, status) => noteAcpProblem('consensusRecall', detail, status));
 }
