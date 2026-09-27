@@ -316,6 +316,33 @@ test('retrieval signals: a degenerate answer is recorded, a clean one is not', a
   assert.equal(afterResolve[2].matched_by, 'none');
 });
 
+test('every registered tool RENDERS its value — a silent renderer is a failed tool', async () => {
+  // The seam this file exists for had a second half nobody had checked: the RENDERER.
+  //
+  // index.ts defaults a missing `output` to `render: () => []`, which was chosen to satisfy the
+  // host's schema validation. But a renderer that returns no content means the tool RUNS, RETURNS the
+  // right value, and shows the caller NOTHING — no error, no warning, nothing to grep for.
+  // Seventeen object-returning tools sat in that state. `notemap_stats` was the one that surfaced,
+  // and it looked like a stats-specific bug precisely because its sibling `notemap_labels` answered
+  // fine — labels had been given an explicit `listOut()` for the unrelated `"value" must be an
+  // object` reason, so the gap was half-patched and therefore misleading.
+  //
+  // Declared-vs-returned assertions cannot see this, because the value IS returned correctly.
+  // Only calling the renderer can.
+  for (const [name, tool] of tools) {
+    const render = tool.output?.render;
+    assert.equal(typeof render, 'function', `${name} declares no output.render`);
+
+    const blocks = await render({}, { nodes: 1, edges: 2, snapshots: 3 });
+    assert.ok(Array.isArray(blocks), `${name}: render must return an array of blocks`);
+    assert.ok(blocks.length > 0, `${name}: render returned NO content — the caller would see nothing`);
+    assert.ok(
+      blocks.some((b) => typeof b?.text === 'string' && b.text.length > 0),
+      `${name}: render produced no text block`,
+    );
+  }
+});
+
 after(() => {
   try { store.close(); } catch {}
   rmSync(dir, { recursive: true, force: true });

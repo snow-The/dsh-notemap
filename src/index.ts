@@ -18,10 +18,24 @@ const defineTool = (o: any) => {
   //   - `type` must be one of object/array/string/number/integer/boolean/null (`json` is not)
   //   - an `object` schema must state `additionalProperties` explicitly
   // `output` itself cannot be omitted either - the host reads `output.render`.
+  //
+  // The default render must SERIALISE, not return []. The original `render: () => []` was chosen to
+  // satisfy the schema check, but a renderer that returns no content makes a tool that ran, returned
+  // a value, and showed the caller NOTHING -- a silent failure with no error anywhere. Seventeen
+  // object-returning tools were in that state (stats, export, centrality, pagerank, add, link,
+  // commit, remove, clear, snapshot, network, agents, consensus, vector, embed, autolink,
+  // import_session); the nine ARRAY-returning ones had already been given an explicit output for the
+  // unrelated `"value" must be an object` reason, which is why the gap looked half-fixed.
+  //
+  // Serialising here matches what graphOut/resolveOut already do in this same file, so the tools now
+  // agree with each other instead of with a placeholder.
   return dshDefineTool({
     ...o,
     parameters,
-    output: o.output ?? { schema: { type: 'object', additionalProperties: true }, render: () => [] },
+    output: o.output ?? {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_a: unknown, v: unknown) => [{ type: 'text', text: JSON.stringify(v, null, 1) ?? String(v) }],
+    },
   });
 };
 
@@ -89,7 +103,7 @@ import {
   removeNote, clearAll, subgraphOf, searchVector, setProvider, embedAll, labelsOf, getStore,
   searchFusedOf, filterNodesOf, envelopeOf, resolveNode,
 } from './notemap.ts';
-import { acpGraphAvailable, importFromAcpGraph, acpGraphRecall } from './acp.ts';
+import { acpGraphAvailable, acpGraphFallbackNote, importFromAcpGraph, acpGraphRecall } from './acp.ts';
 import { buildNetwork, agentTree, consensusRecall } from './network.ts';
 
 export const name = 'dsh-notemap';
@@ -670,12 +684,19 @@ export function apply(ctx: { tools: { register: (def: unknown) => unknown } }): 
       required: [],
     },
     execute: (args: { limit?: number; force?: boolean }) => {
-      // 兼容依赖：ACP 图可用时从 ACP 图导入（避免重复解析 session），否则回退本地解析
+      // 兼容依赖：ACP 图可读且确有内容时从 ACP 图导入（避免重复解析 session），否则回退本地解析。
+      // 注意 acpGraphAvailable() 的语义是"契约可读"，不再等于"图里有 checkpoint"——
+      // 所以"可读但为空"必须落到本地解析，否则这个工具会退化成返回 0 个。
       if (acpGraphAvailable()) {
         const store = getStore();
         const st = importFromAcpGraph(store, args?.force ?? false);
-        return { source: 'acp_graph', entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+        if (st.entities > 0 || st.checkpoints > 0) {
+          return { source: 'acp_graph', entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+        }
       }
+      // 回退本地解析时留下原因：契约【读不了】必须出声（没装 handoff 则安静）。
+      // 否则"ACP 静默失效"和"本来就没装"在日志里仍然一样。
+      acpGraphFallbackNote('notemap_import_session');
       return importSessions({ limit: args?.limit, force: args?.force });
     },
   }));

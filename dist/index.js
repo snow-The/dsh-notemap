@@ -1033,42 +1033,188 @@ function filterNodesOf(args) {
   return envelopeOf(getStore().filterNodes(args.filter ?? {}, TOTAL_CAP), args.limit ?? 50);
 }
 
-// src/acp.ts
+// src/acp-graph-contract.ts
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { join as join2 } from "node:path";
 import { homedir } from "node:os";
+var ACP_GRAPH_CONTRACT_VERSION = 1;
+var ACP_GRAPH_V1_REQUIRED = {
+  checkpoints: ["session_id", "seq_start", "seq_end", "summary", "created_at"],
+  checkpoint_nodes: ["session_id", "seq_start", "node_id"],
+  nodes: ["id", "kind", "title", "mention_count"],
+  cp_fts: ["session_id", "seq_start", "summary"],
+  node_fts: ["id", "title", "kind"],
+  docs: ["id", "kind", "title", "body", "source", "indexed_at"],
+  doc_fts: ["id", "kind", "title", "body"]
+};
+function acpGraphPath() {
+  return join2(process.env.DSH_HOME ?? join2(homedir(), ".dsh"), "graph", "graph.db");
+}
 function ftsPhrase(q) {
   const toks = String(q ?? "").toLowerCase().replace(/["'^*:()\[\]{}]/g, " ").split(/\s+/).filter((t) => t.length > 1).slice(0, 8);
   return toks.length ? toks.map((t) => '"' + t + '"*').join(" OR ") : '""';
 }
-function dshHome() {
-  return process.env.DSH_HOME ?? join2(homedir(), ".dsh");
-}
-function acpGraphPath() {
-  return join2(dshHome(), "graph", "graph.db");
-}
-function warn(what, err) {
-  console.warn("[dsh-notemap] " + what + ":", err instanceof Error ? err.message : String(err));
-}
-function acpGraphAvailable() {
+function tableColumns(db, table) {
   try {
-    if (!existsSync(acpGraphPath())) return false;
-    const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
-    try {
-      const row = db.prepare("SELECT COUNT(*) AS c FROM checkpoints").get();
-      return (row?.c ?? 0) > 0;
-    } finally {
-      db.close();
-    }
-  } catch (err) {
-    warn("ACP graph probe failed", err);
-    return false;
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+    return rows.map((r) => r.name);
+  } catch {
+    return [];
   }
 }
-function importFromAcpGraph(store2, _force = false) {
-  const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
+function acpGraphStatus() {
+  const path = acpGraphPath();
+  const base = { path, contractVersion: ACP_GRAPH_CONTRACT_VERSION };
+  if (!existsSync(path)) {
+    return { ...base, ok: false, stampedVersion: 0, stamped: false, reason: "no-db", detail: `graph.db not found at ${path}` };
+  }
+  let db = null;
   try {
+    db = new DatabaseSync2(path, { readOnly: true });
+    const stampedVersion = Number(
+      db.prepare("PRAGMA user_version").get()?.user_version ?? 0
+    );
+    if (stampedVersion > ACP_GRAPH_CONTRACT_VERSION) {
+      return {
+        ...base,
+        ok: false,
+        stampedVersion,
+        stamped: true,
+        reason: "schema-mismatch",
+        detail: `graph.db is stamped v${stampedVersion} but this reader implements v${ACP_GRAPH_CONTRACT_VERSION}; upgrade the reader`
+      };
+    }
+    const missing = {};
+    for (const [table, cols] of Object.entries(ACP_GRAPH_V1_REQUIRED)) {
+      const have = tableColumns(db, table);
+      if (have.length === 0) {
+        missing[table] = [...cols];
+        continue;
+      }
+      const lack = cols.filter((c) => !have.includes(c));
+      if (lack.length) missing[table] = lack;
+    }
+    if (Object.keys(missing).length) {
+      return {
+        ...base,
+        ok: false,
+        stampedVersion,
+        stamped: stampedVersion > 0,
+        reason: "schema-mismatch",
+        detail: "graph.db shape does not satisfy contract v1",
+        missing
+      };
+    }
+    if (stampedVersion === 0) {
+      return {
+        ...base,
+        ok: true,
+        stampedVersion,
+        stamped: false,
+        reason: "no-contract",
+        detail: "graph.db has no user_version stamp (created before the contract); shape verified against v1"
+      };
+    }
+    return { ...base, ok: true, stampedVersion, stamped: true, reason: "ok" };
+  } catch (e) {
+    return {
+      ...base,
+      ok: false,
+      stampedVersion: 0,
+      stamped: false,
+      reason: "error",
+      detail: e instanceof Error ? e.message : String(e)
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+    }
+  }
+}
+function withAcpGraph(fn) {
+  const status = acpGraphStatus();
+  if (!status.ok) {
+    return {
+      ok: false,
+      reason: status.reason === "ok" ? "error" : status.reason,
+      detail: status.detail ?? status.reason,
+      status
+    };
+  }
+  let db = null;
+  try {
+    db = new DatabaseSync2(status.path, { readOnly: true });
+    return { ok: true, value: fn(db, status), status };
+  } catch (e) {
+    return {
+      ok: false,
+      reason: "error",
+      detail: e instanceof Error ? e.message : String(e),
+      status
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+    }
+  }
+}
+function acpGraphOr(fallback, fn, onProblem) {
+  const r = withAcpGraph(fn);
+  if (r.ok) return r.value;
+  onProblem?.(r.detail, r.status);
+  return fallback;
+}
+function acpGraphRecall(query, limit = 4) {
+  return withAcpGraph((db) => {
+    const q = String(query ?? "").toLowerCase().trim();
+    if (!q) return [];
+    const matchQ = ftsPhrase(q);
+    const out = [];
+    try {
+      const rows = db.prepare("SELECT id FROM node_fts WHERE node_fts MATCH ? LIMIT ?").all(matchQ, limit);
+      for (const r of rows) {
+        const cps = db.prepare("SELECT c.summary FROM checkpoints c JOIN checkpoint_nodes cn ON cn.session_id=c.session_id AND cn.seq_start=c.seq_start WHERE cn.node_id=? ORDER BY c.created_at DESC LIMIT 1").all(r.id);
+        if (cps.length) out.push({ node: r.id, summary: cps[0].summary, score: 1 });
+      }
+    } catch {
+    }
+    try {
+      const cps = db.prepare("SELECT session_id, seq_start, summary FROM cp_fts WHERE cp_fts MATCH ? LIMIT ?").all(matchQ, limit);
+      for (const c of cps) out.push({ node: "cp:" + c.session_id + ":" + c.seq_start, summary: c.summary, score: 0.8 });
+    } catch {
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const dedup = [];
+    for (const o of out) {
+      if (!seen.has(o.node)) {
+        seen.add(o.node);
+        dedup.push(o);
+      }
+    }
+    return dedup.slice(0, limit);
+  });
+}
+
+// src/acp.ts
+var lastProblem = null;
+function note(detail, status) {
+  lastProblem = { detail, status };
+  if (status.reason === "no-db") return;
+  console.warn("[dsh-notemap] ACP graph read failed:", detail, `(reason=${status.reason})`);
+}
+function acpGraphAvailable() {
+  return acpGraphStatus().ok;
+}
+function acpGraphFallbackNote(what) {
+  const s = acpGraphStatus();
+  if (s.ok) return;
+  note(`${what}: falling back because the ACP graph is not readable (${s.detail ?? s.reason})`, s);
+}
+function importFromAcpGraph(store2, _force = false) {
+  return acpGraphOr({ entities: 0, checkpoints: 0, edges: 0 }, (db) => {
     const entRows = db.prepare("SELECT id, kind, title, mention_count FROM nodes").all();
     const nodes = [];
     for (const r of entRows) {
@@ -1101,58 +1247,18 @@ function importFromAcpGraph(store2, _force = false) {
     for (const cn of cnRows) {
       edges.push({ source: "acp:" + cn.node_id, target: "acp-cp:" + cn.session_id + ":" + cn.seq_start, type: "appears-in", weight: 1, meta: { source: "acp_graph" } });
     }
-    const n1 = store2.upsertNodesBatch(nodes);
+    store2.upsertNodesBatch(nodes);
     const n2 = store2.upsertEdgesBatch(edges);
     return { entities: entRows.length, checkpoints: cpRows.length, edges: n2 };
-  } finally {
-    db.close();
-  }
+  }, note);
 }
-function acpGraphRecall(query, limit = 5) {
-  try {
-    if (!acpGraphAvailable()) return [];
-    const db = new DatabaseSync2(acpGraphPath(), { readOnly: true });
-    try {
-      const q = String(query ?? "").toLowerCase().trim();
-      if (!q) return [];
-      const matchQ = ftsPhrase(q);
-      const out = [];
-      try {
-        const rows = db.prepare("SELECT id FROM node_fts WHERE node_fts MATCH ? LIMIT ?").all(matchQ, limit);
-        for (const r of rows) {
-          const cps = db.prepare("SELECT c.summary, c.seq_start FROM checkpoints c JOIN checkpoint_nodes cn ON cn.session_id=c.session_id AND cn.seq_start=c.seq_start WHERE cn.node_id=? ORDER BY c.created_at DESC LIMIT 1").all(r.id);
-          if (cps.length) out.push({ node: r.id, summary: cps[0].summary, score: 1 });
-        }
-      } catch (err) {
-        warn("entity FTS query failed (cross-session hits lost)", err);
-      }
-      try {
-        const cps = db.prepare("SELECT session_id, seq_start, summary FROM cp_fts WHERE cp_fts MATCH ? LIMIT ?").all(matchQ, limit);
-        for (const c of cps) {
-          if (!out.some((o) => o.node === "cp:" + c.session_id + ":" + c.seq_start)) {
-            out.push({ node: "cp:" + c.session_id + ":" + c.seq_start, summary: c.summary, score: 0.8 });
-          }
-        }
-      } catch (err) {
-        warn("checkpoint FTS query failed (cross-session hits lost)", err);
-      }
-      const seen = /* @__PURE__ */ new Set();
-      const dedup = [];
-      for (const o of out) {
-        const key = o.node;
-        if (!seen.has(key)) {
-          seen.add(key);
-          dedup.push(o);
-        }
-      }
-      return dedup.slice(0, limit);
-    } finally {
-      db.close();
-    }
-  } catch (err) {
-    warn("ACP recall failed", err);
+function acpGraphRecall2(query, limit = 5) {
+  const r = acpGraphRecall(query, limit);
+  if (!r.ok) {
+    note(r.detail, r.status);
     return [];
   }
+  return r.value;
 }
 
 // src/network.ts
@@ -1196,24 +1302,27 @@ function recencyDecay(lastSeenMs, nowMs = Date.now(), halfLifeMs = 30 * 24 * 360
 
 // src/network.ts
 var LAYERS = ["soul", "user", "project", "fact", "lesson", "topic", "rules"];
-function dshHome2() {
+function dshHome() {
   return process.env.DSH_DATA_DIR ?? process.env.DSH_HOME ?? join3(homedir2(), ".dsh");
 }
-function acpGraphPath2() {
-  return join3(dshHome2(), "graph", "graph.db");
-}
 function memoryDbPath() {
-  return join3(dshHome2(), "memory", "memory.db");
+  return join3(dshHome(), "memory", "memory.db");
 }
-function warn2(what, err) {
+function warn(what, err) {
   console.warn("[dsh-notemap] " + what + ":", err instanceof Error ? err.message : String(err));
+}
+var lastAcpProblem = null;
+function noteAcpProblem(what, detail, status) {
+  lastAcpProblem = { what, detail, status };
+  if (status.reason === "no-db") return;
+  console.warn("[dsh-notemap] ACP graph read failed (" + what + "):", detail, `(reason=${status.reason})`);
 }
 function openReadOnly(path) {
   try {
     if (!existsSync2(path)) return null;
     return new DatabaseSync3(path, { readOnly: true });
   } catch (err) {
-    warn2("cannot open " + path + " read-only", err);
+    warn("cannot open " + path + " read-only", err);
     return null;
   }
 }
@@ -1221,7 +1330,7 @@ function tableExists(db, table) {
   try {
     return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(table) !== void 0;
   } catch (err) {
-    warn2("schema probe failed for table " + table, err);
+    warn("schema probe failed for table " + table, err);
     return false;
   }
 }
@@ -1260,8 +1369,8 @@ function buildNetwork(options = {}) {
   const nodeRows = [];
   const digestRows = [];
   const edgeRows = [];
-  const acp = openReadOnly(acpGraphPath2());
-  if (acp !== null && tableExists(acp, "nodes")) {
+  const acpRead = withAcpGraph((acp) => {
+    if (!tableExists(acp, "nodes")) return;
     stats.acp_available = true;
     try {
       const nodeCols = columnsOf(acp, "nodes");
@@ -1431,13 +1540,9 @@ function buildNetwork(options = {}) {
         }
       }
     } catch {
-    } finally {
-      try {
-        acp.close();
-      } catch {
-      }
     }
-  }
+  });
+  if (!acpRead.ok) noteAcpProblem("network build", acpRead.detail, acpRead.status);
   const mem = openReadOnly(memoryDbPath());
   const entityTitles = [];
   if (options.memory !== false) {
@@ -1499,112 +1604,104 @@ function buildNetwork(options = {}) {
   return stats;
 }
 function agentTree() {
-  const acp = openReadOnly(acpGraphPath2());
-  if (acp === null || !tableExists(acp, "sources")) return [];
-  try {
-    const rows = acp.prepare(`
-      SELECT s.id, s.session_id, s.parent_session, s.agent_kind, s.cwd,
-             (SELECT COUNT(DISTINCT m.node_id) FROM mentions m WHERE m.source_id = s.id) AS entities,
-             (SELECT COALESCE(SUM(m.count), 0) FROM mentions m WHERE m.source_id = s.id) AS mentions,
-             (SELECT COUNT(*) FROM checkpoints c WHERE c.session_id = s.session_id) AS checkpoints
-      FROM sources s`).all();
-    const byId = /* @__PURE__ */ new Map();
-    for (const r of rows) {
-      byId.set(String(r.session_id), {
-        session_id: String(r.session_id),
-        agent_kind: String(r.agent_kind ?? "main"),
-        cwd: r.cwd ?? null,
-        parent: r.parent_session === void 0 || r.parent_session === null ? null : String(r.parent_session),
-        entities: Number(r.entities ?? 0),
-        mentions: Number(r.mentions ?? 0),
-        checkpoints: Number(r.checkpoints ?? 0),
-        children: []
-      });
-    }
-    for (const entry of byId.values()) {
-      if (entry.parent === null) continue;
-      byId.get(entry.parent)?.children.push(entry.session_id);
-    }
-    return [...byId.values()].sort((a, b) => b.entities - a.entities);
-  } catch (err) {
-    warn2("agentTree query failed", err);
-    return [];
-  } finally {
+  return acpGraphOr([], (acp) => {
+    if (!tableExists(acp, "sources")) return [];
     try {
-      acp.close();
-    } catch {
+      const rows = acp.prepare(`
+        SELECT s.id, s.session_id, s.parent_session, s.agent_kind, s.cwd,
+               (SELECT COUNT(DISTINCT m.node_id) FROM mentions m WHERE m.source_id = s.id) AS entities,
+               (SELECT COALESCE(SUM(m.count), 0) FROM mentions m WHERE m.source_id = s.id) AS mentions,
+               (SELECT COUNT(*) FROM checkpoints c WHERE c.session_id = s.session_id) AS checkpoints
+        FROM sources s`).all();
+      const byId = /* @__PURE__ */ new Map();
+      for (const r of rows) {
+        byId.set(String(r.session_id), {
+          session_id: String(r.session_id),
+          agent_kind: String(r.agent_kind ?? "main"),
+          cwd: r.cwd ?? null,
+          parent: r.parent_session === void 0 || r.parent_session === null ? null : String(r.parent_session),
+          entities: Number(r.entities ?? 0),
+          mentions: Number(r.mentions ?? 0),
+          checkpoints: Number(r.checkpoints ?? 0),
+          children: []
+        });
+      }
+      for (const entry of byId.values()) {
+        if (entry.parent === null) continue;
+        byId.get(entry.parent)?.children.push(entry.session_id);
+      }
+      return [...byId.values()].sort((a, b) => b.entities - a.entities);
+    } catch (err) {
+      warn("agentTree query failed", err);
+      return [];
     }
-  }
+  }, (detail, status) => noteAcpProblem("agentTree", detail, status));
 }
 function consensusRecall(query, options = {}) {
-  const acp = openReadOnly(acpGraphPath2());
-  if (acp === null || !tableExists(acp, "nodes") || !tableExists(acp, "mentions")) return [];
-  try {
-    const rows = acp.prepare(`
-      SELECT m.node_id, m.source_id, n.title, n.kind, m.count, m.last_seen, s.session_id, s.agent_kind
-      FROM mentions m
-      JOIN nodes n ON n.id = m.node_id
-      LEFT JOIN sources s ON s.id = m.source_id
-      WHERE n.title LIKE ?`).all(`%${query}%`);
-    const byId = /* @__PURE__ */ new Map();
-    for (const r of rows) {
-      const list = byId.get(String(r.node_id));
-      if (list === void 0) byId.set(String(r.node_id), [r]);
-      else list.push(r);
-    }
-    const perSource = /* @__PURE__ */ new Map();
-    for (const list of byId.values()) {
-      for (const r of list) {
-        const arr = perSource.get(Number(r.source_id));
-        if (arr === void 0) perSource.set(Number(r.source_id), [r]);
-        else arr.push(r);
-      }
-    }
-    const lists = [...perSource.values()].map((arr) => arr.sort((a, b) => Number(b.count ?? 1) - Number(a.count ?? 1)).map((r) => String(r.node_id)));
-    const fused = /* @__PURE__ */ new Map();
-    lists.forEach((list, index) => {
-      list.forEach((id, rank) => {
-        const entry = fused.get(id) ?? { score: 0, sources: [] };
-        entry.score += 1 / ((options.k ?? 60) + rank + 1);
-        entry.sources.push(index);
-        fused.set(id, entry);
-      });
-    });
-    const now = Date.now();
-    const results = [...fused.entries()].map(([id, entry]) => {
-      const list = byId.get(id) ?? [];
-      const first = list[0];
-      const distinct = new Set(entry.sources).size;
-      const mentions = list.reduce((sum, r) => sum + Number(r.count ?? 1), 0);
-      const lastSeen = Math.max(...list.map((r) => Number(r.last_seen ?? 0)));
-      const confidence = betaConfidence(mentions);
-      const recency = recencyDecay(lastSeen, now);
-      const consensus = 1 + Math.log(1 + distinct);
-      return {
-        id,
-        title: String(first?.title ?? id),
-        kind: first?.kind === void 0 ? null : String(first.kind),
-        score: entry.score * consensus * confidence * recency,
-        sources: distinct,
-        agent_kinds: [...new Set(list.map((r) => String(r.agent_kind ?? "main")))],
-        sessions: [...new Set(list.map((r) => String(r.session_id ?? "?")))].slice(0, 5),
-        mentions,
-        confidence,
-        recency,
-        consensus
-      };
-    });
-    const minSources = options.minSources ?? 0;
-    return results.filter((r) => r.sources >= minSources).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, options.limit ?? 15);
-  } catch (err) {
-    warn2("consensus recall failed", err);
-    return [];
-  } finally {
+  return acpGraphOr([], (acp) => {
+    if (!tableExists(acp, "nodes") || !tableExists(acp, "mentions")) return [];
     try {
-      acp.close();
-    } catch {
+      const rows = acp.prepare(`
+        SELECT m.node_id, m.source_id, n.title, n.kind, m.count, m.last_seen, s.session_id, s.agent_kind
+        FROM mentions m
+        JOIN nodes n ON n.id = m.node_id
+        LEFT JOIN sources s ON s.id = m.source_id
+        WHERE n.title LIKE ?`).all(`%${query}%`);
+      const byId = /* @__PURE__ */ new Map();
+      for (const r of rows) {
+        const list = byId.get(String(r.node_id));
+        if (list === void 0) byId.set(String(r.node_id), [r]);
+        else list.push(r);
+      }
+      const perSource = /* @__PURE__ */ new Map();
+      for (const list of byId.values()) {
+        for (const r of list) {
+          const arr = perSource.get(Number(r.source_id));
+          if (arr === void 0) perSource.set(Number(r.source_id), [r]);
+          else arr.push(r);
+        }
+      }
+      const lists = [...perSource.values()].map((arr) => arr.sort((a, b) => Number(b.count ?? 1) - Number(a.count ?? 1)).map((r) => String(r.node_id)));
+      const fused = /* @__PURE__ */ new Map();
+      lists.forEach((list, index) => {
+        list.forEach((id, rank) => {
+          const entry = fused.get(id) ?? { score: 0, sources: [] };
+          entry.score += 1 / ((options.k ?? 60) + rank + 1);
+          entry.sources.push(index);
+          fused.set(id, entry);
+        });
+      });
+      const now = Date.now();
+      const results = [...fused.entries()].map(([id, entry]) => {
+        const list = byId.get(id) ?? [];
+        const first = list[0];
+        const distinct = new Set(entry.sources).size;
+        const mentions = list.reduce((sum, r) => sum + Number(r.count ?? 1), 0);
+        const lastSeen = Math.max(...list.map((r) => Number(r.last_seen ?? 0)));
+        const confidence = betaConfidence(mentions);
+        const recency = recencyDecay(lastSeen, now);
+        const consensus = 1 + Math.log(1 + distinct);
+        return {
+          id,
+          title: String(first?.title ?? id),
+          kind: first?.kind === void 0 ? null : String(first.kind),
+          score: entry.score * consensus * confidence * recency,
+          sources: distinct,
+          agent_kinds: [...new Set(list.map((r) => String(r.agent_kind ?? "main")))],
+          sessions: [...new Set(list.map((r) => String(r.session_id ?? "?")))].slice(0, 5),
+          mentions,
+          confidence,
+          recency,
+          consensus
+        };
+      });
+      const minSources = options.minSources ?? 0;
+      return results.filter((r) => r.sources >= minSources).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, options.limit ?? 15);
+    } catch (err) {
+      warn("consensus recall failed", err);
+      return [];
     }
-  }
+  }, (detail, status) => noteAcpProblem("consensusRecall", detail, status));
 }
 
 // src/index.ts
@@ -1621,7 +1718,10 @@ var defineTool = (o) => {
   return dshDefineTool({
     ...o,
     parameters,
-    output: o.output ?? { schema: { type: "object", additionalProperties: true }, render: () => [] }
+    output: o.output ?? {
+      schema: { type: "object", additionalProperties: true },
+      render: (_a, v) => [{ type: "text", text: JSON.stringify(v, null, 1) ?? String(v) }]
+    }
   });
 };
 var listOut = (items = { type: "object", additionalProperties: true }) => ({
@@ -2158,7 +2258,7 @@ function apply(ctx) {
         snippet: h.snippet,
         linked: (h.neighbors ?? []).map((nb) => nb.id + " (" + nb.type + " w" + nb.weight + ")").join(", ")
       }));
-      const acp = acpGraphRecall(args.query, 3);
+      const acp = acpGraphRecall2(args.query, 3);
       const acpHits = acp.map((h) => ({
         id: h.node,
         title: h.node,
@@ -2184,8 +2284,11 @@ function apply(ctx) {
       if (acpGraphAvailable()) {
         const store2 = getStore();
         const st = importFromAcpGraph(store2, args?.force ?? false);
-        return { source: "acp_graph", entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+        if (st.entities > 0 || st.checkpoints > 0) {
+          return { source: "acp_graph", entities: st.entities, checkpoints: st.checkpoints, edges: st.edges };
+        }
       }
+      acpGraphFallbackNote("notemap_import_session");
       return importSessions({ limit: args?.limit, force: args?.force });
     }
   }));
