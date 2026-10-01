@@ -32,6 +32,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": [
+        "0.2.0-rc.1",
+        "0.2.0-rc.2"
+      ],
+      "verifiedAgainst": "0.2.0-rc.2"
     }
   },
   "repository": {
@@ -45,5 +52,9 @@
     "lit": "^3.3.3",
     "litegraph.js": "^0.7.18",
     "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1"
   }
 }
