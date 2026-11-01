@@ -35,12 +35,9 @@
     },
     "compatibility": {
       "dshReleases": [
-        "0.2.0-rc.1",
-        "0.2.0-rc.2",
-        "0.2.1-rc.2",
-        "0.2.1-rc.3"
+        "0.2.1-rc.5"
       ],
-      "verifiedAgainst": "0.2.1-rc.3"
+      "verifiedAgainst": "0.2.1-rc.5"
     }
   },
   "repository": {
@@ -56,10 +53,10 @@
     "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1"
+    "@deepseek-ai/dsh": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5"
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.5"
   }
 }
